@@ -8,3 +8,9 @@ test('every static UI action has a dispatcher branch',()=>{
 test('known runtime actions have concrete functions',()=>{
  for(const name of ['saveNotes','joinCommunity','communityDialog','submitCommunity','generateSummary'])assert.match(app,new RegExp(`function\\s+${name}\\s*\\(`));
 });
+test('Studio connection actions and TCG removal remain wired deliberately',()=>{
+ const renderer=fs.readFileSync('src/editor/ConnectionRenderer.js','utf8');
+ for(const action of [...renderer.matchAll(/button\('(connection-[\w-]+)'/g)].map(match=>match[1]))assert.ok(app.includes(`action==='${action}'`),action);
+ assert.doesNotMatch(app,/launch-game|openFraktumGame/);assert.doesNotMatch(pages,/launch-game|game-launch/);
+ assert.doesNotMatch(fs.readFileSync('src/style.css','utf8'),/\.game-launch/);
+});

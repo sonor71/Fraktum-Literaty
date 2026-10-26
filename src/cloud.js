@@ -55,60 +55,6 @@ export async function ensureSession(){
 export function getSession(){return session;}
 export function isCloudAuthenticated(){return !!session?.access_token;}
 
-export async function openFraktumGame(){
-  const gameUrl=String(config.gameUrl||'https://fraktum-tcg-main.vercel.app').replace(/\/$/,'');
-  let gameOrigin='';
-  try{gameOrigin=new URL(gameUrl).origin;}catch{throw new Error('Некорректный адрес FRAKTUM TCG');}
-
-  let popup=null;
-  let cleanupTimer=null;
-
-  const cleanup=()=>{
-    window.removeEventListener('message',handleGameAuthRequest);
-    if(cleanupTimer)clearTimeout(cleanupTimer);
-  };
-
-  const handleGameAuthRequest=async event=>{
-    if(!popup||event.source!==popup||event.origin!==gameOrigin)return;
-    if(event.data?.type!=='fraktum:auth-request')return;
-
-    await ensureSession().catch(()=>null);
-    if(!session?.access_token||!session?.refresh_token)return;
-
-    let projectRef='';
-    try{projectRef=new URL(SUPABASE_URL).hostname.split('.')[0]||'';}catch{}
-    if(event.data?.projectRef&&projectRef&&event.data.projectRef!==projectRef)return;
-
-    popup.postMessage({
-      type:'fraktum:auth-session',
-      projectRef,
-      session:{
-        access_token:session.access_token,
-        refresh_token:session.refresh_token,
-        expires_at:session.expires_at||null,
-        token_type:session.token_type||'bearer',
-        user:session.user||null
-      }
-    },gameOrigin);
-
-    cleanupTimer=setTimeout(cleanup,1800);
-  };
-
-  window.addEventListener('message',handleGameAuthRequest);
-
-  // Open immediately inside the click gesture so Safari/Chrome do not treat it
-  // as an async popup and block it.
-  popup=window.open(gameUrl,'fraktum-tcg');
-
-  if(!popup){
-    cleanup();
-    throw new Error('Браузер заблокировал открытие FRAKTUM TCG. Разреши всплывающие окна для сайта.');
-  }
-
-  void ensureSession().catch(()=>null);
-  cleanupTimer=setTimeout(cleanup,12000);
-  return popup;
-}
 
 export async function signOut(){
   try{
@@ -523,10 +469,10 @@ export async function fetchEvaluationCatalog({limit=24,offset=0}={}){
   const fragmentItems=(fragments||[]).map(fragment=>({fragmentId:fragment.id,versionId:fragment.version_id||`fragment:${fragment.id}`,cloudWorkId:fragment.work_id,workId:fragment.work_id?`cloud:${fragment.work_id}`:`fragment:${fragment.id}`,title:fragment.title,summary:'Фрагмент',genres:[],topics:[],cover:'',plainText:fragment.plain_text||'',minutes:Math.max(1,Math.ceil(String(fragment.plain_text||'').length/900)),createdAt:fragment.published_at}));
   return [...fragmentItems,...workItems].sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,pageSize);
 }
-export async function saveCloudFragment(local,{publish=true}={}){
+export async function saveCloudFragment(local,{publish=true,evaluationOpen=publish}={}){
   await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Войдите в аккаунт');
   const content=assertPersistableDocument({type:'doc',content:[{type:'paragraph',text:local.content||''}],...serializeWorkContent(local)});
-  const payload={author_id:me,work_id:local.cloudId||null,version_id:local.cloudVersionId||null,title:local.title||'Без названия',content,plain_text:local.content||'',visibility:publish?'public':'private',evaluation_open:publish,updated_at:new Date().toISOString(),...(publish?{published_at:local.publishedAt||new Date().toISOString()}:{})};
+  const payload={author_id:me,work_id:local.cloudId||null,version_id:local.cloudVersionId||null,title:local.title||'Без названия',content,plain_text:local.content||'',visibility:publish?'public':'private',evaluation_open:evaluationOpen,updated_at:new Date().toISOString(),...(publish?{published_at:local.publishedAt||new Date().toISOString()}:{})};
   if(local.fragmentCloudId){const rows=await rest(`lit_fragments?id=eq.${local.fragmentCloudId}&author_id=eq.${me}`,{method:'PATCH',body:payload,headers:{Prefer:'return=representation'}});return rows?.[0];}
   const rows=await rest('lit_fragments',{method:'POST',body:payload,headers:{Prefer:'return=representation'}});return rows?.[0];
 }

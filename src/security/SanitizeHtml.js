@@ -1,5 +1,5 @@
 const ALLOWED_TAGS=new Set(['P','BR','DIV','SPAN','STRONG','B','EM','I','U','S','H1','H2','H3','UL','OL','LI','BLOCKQUOTE','A','FIGURE','FIGCAPTION','IMG']);
-const SAFE_STYLE=new Set(['font-family','font-size','line-height','color','background-color','text-align','width','max-width','margin','margin-left','margin-right','float','shape-outside','object-fit','object-position']);
+const SAFE_STYLE=new Set(['font-family','font-size','font-weight','font-style','text-decoration','text-decoration-line','line-height','color','background-color','text-align','width','max-width','margin','margin-left','margin-right','float','shape-outside','object-fit','object-position']);
 export function safeUrl(value,{image=false}={}){const raw=String(value||'').trim();if(!raw)return '';if(image&&raw.startsWith('blob:'))return raw;try{const url=new URL(raw,location.origin);if(!['http:','https:'].includes(url.protocol))return '';return url.href;}catch{return '';}}
 function cleanStyle(value){return String(value||'').split(';').map(rule=>rule.split(':')).filter(([property,...parts])=>SAFE_STYLE.has(property?.trim().toLowerCase())&&parts.length&& !/url\s*\(|expression\s*\(|javascript:/i.test(parts.join(':'))).map(([property,...parts])=>`${property.trim()}:${parts.join(':').trim()}`).join(';');}
 export function sanitizeHtml(html){

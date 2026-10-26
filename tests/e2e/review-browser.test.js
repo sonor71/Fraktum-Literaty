@@ -35,8 +35,11 @@ test('a denied review write preserves the form and never claims publication or a
   assert.equal(await page.locator('.review-success').count(),0);
   const reviewMethods=()=>fixture.requests.filter(request=>request.pathname==='/rest/v1/lit_reviews').map(request=>request.method);
   assert.equal(reviewMethods().includes('POST'),false,`denied POST unexpectedly reached backend fixture; review requests: ${reviewMethods().join(', ')||'none'}`);
+  const created=page.waitForResponse(response=>new URL(response.url()).pathname==='/rest/v1/lit_reviews'&&response.request().method()==='POST'&&response.status()===201);
   await page.locator('#reviewForm button.primary').click();
-  await page.waitForFunction(async()=>{const {state}=await import('/src/state.js');return state.reviews[0]?.cloud===true;});
+  await created;
+  await page.locator('#reviewForm').waitFor({state:'detached'});
+  assert.equal(await page.evaluate(async()=>{const {state}=await import('/src/state.js');return state.reviews[0]?.cloud;}),true);
   assert.equal(fixture.tables.lit_reviews.length,1,`second submit did not create a review; review requests: ${reviewMethods().join(', ')||'none'}`);
   assert.equal(reviewMethods().filter(method=>method==='POST').length,1,`expected exactly one POST to reach backend fixture; review requests: ${reviewMethods().join(', ')||'none'}`);
   assert.equal(fixture.tables.lit_reviews[0].body,comment);
