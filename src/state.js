@@ -17,6 +17,7 @@ function canvasForLegacyPage(page,work,index){
     return {
       background:{color:'#f7f1e5',image:'',fit:'cover',position:'center',...(p.canvas.background||{})},
       textColor:p.canvas.textColor||'#191715',
+      connections:p.canvas.connections||[],
       objects:p.canvas.objects.map((o,i)=>({
         id:o.id||`obj-${now}-${index}-${i}`,
         type:o.type==='image'?'image':'text',

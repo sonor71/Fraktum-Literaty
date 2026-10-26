@@ -7,9 +7,11 @@ export function createEditorRoot({readSnapshot,applySnapshot,onChange,readContex
   const syncContext=()=>{const next=readContext();if(next!==context){history.clear();context=next;}};
   return {
     history,
+    get canUndo(){syncContext();return history.canUndo;},
+    get canRedo(){syncContext();return history.canRedo;},
     begin(label){syncContext();history.begin(readSnapshot(),label);},
     commit(){const changed=history.commit(readSnapshot());if(changed)onChange?.('commit');return changed;},
-    record(label,mutate){syncContext();const before=readSnapshot();mutate();const changed=history.record(before,readSnapshot(),label);if(changed)onChange?.('commit');return changed;},
+    record(label,mutate){syncContext();const before=structuredClone(readSnapshot());mutate();const changed=history.record(before,readSnapshot(),label);if(changed)onChange?.('commit');return changed;},
     undo(){syncContext();return history.undo();},
     redo(){syncContext();return history.redo();}
   };

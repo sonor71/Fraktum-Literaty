@@ -3,10 +3,13 @@ import {ANNOTATION_TYPES,FEEDBACK_CATEGORIES} from './data.js';
 import * as pages from './pages.js';
 import {esc,modal,toast} from './ui.js';
 import {showFeedback,withOperation} from './feedback/OperationFeedback.js';
-import {ensureSession,getSession,openFraktumGame,signOut,getMyProfile,updateMyProfile,fetchPublicFeed,createCloudPost,toggleCloudPostLike,fetchPostComments,createCloudComment,setCloudCommentReaction,isCloudAuthenticated,requestOtp,verifyOtp,createMyProfile,checkServerConnection,findProfileByUsername,getOrCreateDirectConversation,createCloudGroupConversation,fetchMyConversations,fetchConversationMessages,sendCloudMessage,getConversationPeer,createCloudCall,fetchIncomingCalls,getCloudCall,setCloudCallStatus,sendCloudCallSignal,fetchCloudCallSignals,fetchNotifications,markNotificationRead,markAllNotificationsRead,createReport,fetchModerationReports,setModerationReportStatus,requestAuthorVerification,fetchMyVerificationRequests,fetchVerificationRequests,resolveAuthorVerification,fetchCloudLiterature,saveCloudWork,saveCloudReview,setCloudReviewReaction,saveCloudReadingProgress,uploadWorkAsset,publicObjectUrl,fetchDiscoveryCatalogs,fetchMyProfileDetails,replaceMyProfileDetails,uploadProfileMedia,createEvaluationSession,completeEvaluationItem,fetchEvaluationCatalog,saveCloudFragment,createCloudAnnotation,deleteCloudAnnotation,fetchAuthorFeedback,saveCloudWorkTaxonomy} from './cloud.js';
+import {ensureSession,getSession,signOut,getMyProfile,updateMyProfile,fetchPublicFeed,createCloudPost,toggleCloudPostLike,fetchPostComments,createCloudComment,setCloudCommentReaction,isCloudAuthenticated,requestOtp,verifyOtp,createMyProfile,checkServerConnection,findProfileByUsername,getOrCreateDirectConversation,createCloudGroupConversation,fetchMyConversations,fetchConversationMessages,sendCloudMessage,getConversationPeer,createCloudCall,fetchIncomingCalls,getCloudCall,setCloudCallStatus,sendCloudCallSignal,fetchCloudCallSignals,fetchNotifications,markNotificationRead,markAllNotificationsRead,createReport,fetchModerationReports,setModerationReportStatus,requestAuthorVerification,fetchMyVerificationRequests,fetchVerificationRequests,resolveAuthorVerification,fetchCloudLiterature,saveCloudWork,saveCloudReview,setCloudReviewReaction,saveCloudReadingProgress,uploadWorkAsset,publicObjectUrl,fetchDiscoveryCatalogs,fetchMyProfileDetails,replaceMyProfileDetails,uploadProfileMedia,createEvaluationSession,completeEvaluationItem,fetchEvaluationCatalog,saveCloudFragment,createCloudAnnotation,deleteCloudAnnotation,fetchAuthorFeedback,saveCloudWorkTaxonomy} from './cloud.js';
 import {AssetService} from './editor/AssetService.js';
 import {CallSession,CALL_STATUS_LABELS} from './CallSession.js';
 import {createEditorRoot} from './editor/EditorRoot.js';
+import {createConnectionController} from './editor/ConnectionController.js';
+import {removeDanglingConnections} from './editor/ConnectionModel.js';
+import {scrollSelectedPage,pageHasContent,removeStudioPage} from './editor/PageNavigation.js';
 import {normalizeMediaObject,normalizePageMedia,workPages} from './editor/MediaModel.js';
 import {attachEditorImageStatus} from './editor/ImageStatus.js';
 import {createSaveQueue} from './editor/SaveQueue.js';
@@ -60,8 +63,9 @@ const editorRoot=createEditorRoot({
   readContext:()=>{const ctx=currentCanvasState();return ctx?.page.id||null;},
   readSnapshot:()=>structuredClone(currentCanvasState()?.canvas||null),
   applySnapshot:snapshot=>{const ctx=currentCanvasState();if(!ctx||!snapshot)return;ctx.page.canvas=structuredClone(snapshot);save();render();},
-  onChange:()=>scheduleStudioAutosave()
+  onChange:()=>{scheduleStudioAutosave();updateHistoryControls();}
 });
+const studioConnections=createConnectionController({context:currentCanvasState,sync:syncCanvasDomToState,history:editorRoot,changed:()=>{save();scheduleStudioAutosave();},feedback:showFeedback,selectObject:selectCanvasObject});
 document.addEventListener('keydown',event=>{
   if(!(event.ctrlKey||event.metaKey)||event.key.toLowerCase()!=='z'||!document.querySelector('#freePageCanvas'))return;
   if(event.target.closest?.('input,textarea,[contenteditable="true"]'))return;
@@ -110,8 +114,8 @@ function reportSyncIssue(context,error){
   showFeedback(`Не удалось синхронизировать ${message}`,{kind:'error'});
 }
 function navigationSnapshot(){
-  const {page,postId,selectedWorkId,selectedStudioWorkId,selectedCommunityId,evaluationWorkId}=state.ui;
-  return {page,postId,selectedWorkId,selectedStudioWorkId,selectedCommunityId,evaluationWorkId};
+  const {page,postId,selectedWorkId,selectedStudioWorkId,selectedCommunityId,evaluationWorkId,bookPageIndex}=state.ui;
+  return {page,postId,selectedWorkId,selectedStudioWorkId,selectedCommunityId,evaluationWorkId,bookPageIndex};
 }
 function rememberNavigationScroll(){
   window.history.replaceState({...window.history.state,fraktum:{route:navigationSnapshot(),scroll:{x:window.scrollX,y:window.scrollY}}},'');
@@ -231,6 +235,8 @@ function attachSpecial(){
   attachMediaInteractions();
   updateMediaControls();
   attachCanvasInteractions();
+  studioConnections.attach();
+  scrollSelectedPage(document.querySelector('.studio-outline .page-list'));
   attachEditorImageStatus();
   attachCanvasWrapProxies();
   updateCanvasInspector();
@@ -251,6 +257,12 @@ function attachSpecial(){
   attachBookSwipe();
   updateEditorWordCount();
   syncEditorToolbar();
+  updateHistoryControls();
+}
+
+function updateHistoryControls(){
+  document.querySelectorAll('[data-action="editor-cmd"][data-cmd="undo"]').forEach(button=>button.disabled=!editorRoot.canUndo);
+  document.querySelectorAll('[data-action="editor-cmd"][data-cmd="redo"]').forEach(button=>button.disabled=!editorRoot.canRedo);
 }
 
 function scheduleStudioAutosave(){
@@ -272,20 +284,23 @@ function scheduleStudioAutosave(){
   },650);
 }
 
-function persistStudioWork(work,mode='draft'){
+function persistStudioWork(work,mode='draft',overrides={}){
   return queueStudioSave(async()=>{
+    const snapshot={...structuredClone(work),...overrides};
     if(work.creationType==='fragment'){
-      const fragment=await saveCloudFragment(structuredClone(work),{publish:mode==='evaluation'||work.evaluationStatus==='open'});
+      const fragment=await saveCloudFragment(snapshot,{publish:mode==='evaluation'||snapshot.publicationStatus==='published',evaluationOpen:mode==='evaluation'||snapshot.evaluationStatus==='open'});
       if(!fragment?.id)throw new Error('Сервер не вернул сохранённый фрагмент');
       const oldId=work.id,newId=`fragment:${fragment.id}`;
-      update(s=>{work.fragmentCloudId=fragment.id;work.cloud=true;work.id=newId;if(s.ui.selectedStudioWorkId===oldId)s.ui.selectedStudioWorkId=newId;});
+      update(s=>{work.fragmentCloudId=fragment.id;work.cloud=true;work.id=newId;work.publicationStatus=fragment.visibility==='public'?'published':'draft';work.evaluationStatus=fragment.evaluation_open?'open':'closed';if(s.ui.selectedStudioWorkId===oldId)s.ui.selectedStudioWorkId=newId;});
       const form=document.querySelector('#workEditor');if(form?.dataset.id===oldId)form.dataset.id=newId;
+      if(state.ui.page==='create')rememberNavigationScroll();
       return {fragment};
     }
-    const result=await saveCloudWork(structuredClone(work),{mode});
+    const result=await saveCloudWork(snapshot,{mode});
     const oldId=work.id,newId=`cloud:${result.work.id}`;
     update(s=>{Object.assign(work,{id:newId,cloud:true,cloudId:result.work.id,cloudVersionId:result.version.id,version:String(result.version.version_no)});if(s.ui.selectedStudioWorkId===oldId)s.ui.selectedStudioWorkId=newId;if(s.ui.selectedWorkId===oldId)s.ui.selectedWorkId=newId;for(const key of ['later','reading','completed'])s.library[key]=s.library[key].map(id=>id===oldId?newId:id);if(s.readingProgress[oldId]!=null){s.readingProgress[newId]=s.readingProgress[oldId];delete s.readingProgress[oldId];}});
     const form=document.querySelector('#workEditor');if(form?.dataset.id===oldId)form.dataset.id=newId;
+    if(state.ui.page==='create')rememberNavigationScroll();
     return result;
   });
 }
@@ -468,6 +483,7 @@ function applyCanvasObjectGeometry(obj){
   if(!obj)return;
   const x=Number(obj.dataset.x)||0,y=Number(obj.dataset.y)||0,w=Number(obj.dataset.w)||100,h=Number(obj.dataset.h)||100,r=Number(obj.dataset.rotation)||0;
   obj.style.left=canvasPercent(x,PAGE_CANVAS_W);obj.style.top=canvasPercent(y,PAGE_CANVAS_H);obj.style.width=canvasPercent(w,PAGE_CANVAS_W);obj.style.height=canvasPercent(h,PAGE_CANVAS_H);obj.style.zIndex=String(Number(obj.dataset.z)||1);obj.style.transform=`rotate(${r}deg)`;
+  studioConnections.refreshGeometry();
 }
 function cleanCanvasTextHtml(content){
   const clone=content.cloneNode(true);clone.querySelectorAll('.canvas-wrap-proxy,img,figure').forEach(x=>x.remove());return sanitizeHtml(clone.innerHTML);
@@ -510,8 +526,11 @@ function selectCanvasObject(obj){
   if(obj){obj.classList.add('is-selected');update(s=>s.ui.canvasSelectedObjectId=obj.dataset.objectId,{persist:false});}
   else update(s=>s.ui.canvasSelectedObjectId=null,{persist:false});
   updateCanvasInspector();
+  studioConnections.objectSelected();
 }
 function updateCanvasInspector(){
+  const toolbar=document.querySelector('.canvas-selection-toolbar');
+  if(toolbar)toolbar.hidden=!(selectedCanvasObject&&document.body.contains(selectedCanvasObject));
   const empty=document.querySelector('#canvasObjectEmpty'),box=document.querySelector('#canvasObjectControls');
   if(!empty||!box)return;
   const obj=selectedCanvasObject&&document.body.contains(selectedCanvasObject)?selectedCanvasObject:null;
@@ -571,7 +590,7 @@ function startCanvasRotate(e,obj){
 function addCanvasChrome(obj){
   if(obj.querySelector(':scope > .canvas-object-chrome'))return;
   const chrome=document.createElement('div');chrome.className='canvas-object-chrome';chrome.setAttribute('contenteditable','false');
-  const move=document.createElement('button');move.type='button';move.className='canvas-move-handle';move.title='Перетащить';move.textContent='⠿';move.addEventListener('pointerdown',e=>startCanvasDrag(e,obj));chrome.appendChild(move);
+  const move=document.createElement('button');move.type='button';move.dataset.action='canvas-move';move.className='canvas-move-handle';move.title='Перетащить или переместить стрелками';move.setAttribute('aria-label',move.title);move.textContent='⠿';move.addEventListener('pointerdown',e=>startCanvasDrag(e,obj));chrome.appendChild(move);
   for(const dir of ['nw','n','ne','e','se','s','sw','w']){const h=document.createElement('span');h.className=`canvas-resize-handle handle-${dir}`;h.dataset.dir=dir;h.addEventListener('pointerdown',e=>startCanvasResize(e,obj,dir));chrome.appendChild(h);}
   const rot=document.createElement('span');rot.className='canvas-rotate-handle';rot.title='Повернуть';rot.addEventListener('pointerdown',e=>startCanvasRotate(e,obj));chrome.appendChild(rot);obj.appendChild(chrome);
 }
@@ -603,12 +622,12 @@ async function handleCanvasImagePaste(e){
   try{const asset=await uploadStudioAsset(file),ctx=currentCanvasState();if(ctx){ctx.w.mediaLibrary??=[];ctx.w.mediaLibrary.push(asset);}addCanvasImageObject(asset.url,file.name||'Вставленное изображение',240,250,asset);}catch(err){showFeedback(`Не удалось вставить изображение: ${err.message}`);}
 }
 function addCanvasTextObject(kind='text',x=100,y=120){
-  const ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();editorRoot.begin('create text');const id=`text-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,note=kind==='note';const z=Math.max(0,...ctx.canvas.objects.map(o=>Number(o.z)||0))+1;ctx.canvas.objects.push({id,type:'text',x:clampCanvas(x,0,PAGE_CANVAS_W-260),y:clampCanvas(y,0,PAGE_CANVAS_H-120),w:note?300:360,h:note?180:150,z,rotation:0,html:note?'<p>Новая заметка</p>':'<p>Введите текст…</p>',flow:!note,locked:false,style:{fontFamily:'Georgia',fontSize:note?20:18,lineHeight:1.45,color:note?'#34230f':null,align:'left',background:note?'#fff1a8':'transparent',padding:note?18:8}});update(s=>s.ui.canvasSelectedObjectId=id,{persist:false});editorRoot.commit();save();render();requestAnimationFrame(()=>{const el=document.querySelector(`[data-object-id="${CSS.escape(id)}"] .canvas-text-content`);if(el){el.focus();const sel=getSelection();sel?.selectAllChildren(el);}});
+  const ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();editorRoot.begin('create text');const id=`text-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,note=kind==='note'||kind==='card';const z=Math.max(0,...ctx.canvas.objects.map(o=>Number(o.z)||0))+1;ctx.canvas.objects.push({id,type:'text',role:kind==='card'?'connection-card':note?'note':'',x:clampCanvas(x,0,PAGE_CANVAS_W-260),y:clampCanvas(y,0,PAGE_CANVAS_H-120),w:note?300:360,h:note?180:150,z,rotation:0,html:kind==='card'?'<p>Новая карточка</p>':note?'<p>Новая заметка</p>':'<p>Введите текст…</p>',flow:!note,locked:false,style:{fontFamily:'Georgia',fontSize:note?20:18,lineHeight:1.45,color:note?'#34230f':null,align:'left',background:note?'#fff1a8':'transparent',padding:note?18:8}});update(s=>s.ui.canvasSelectedObjectId=id,{persist:false});editorRoot.commit();save();render();requestAnimationFrame(()=>{const el=document.querySelector(`[data-object-id="${CSS.escape(id)}"] .canvas-text-content`);if(el){el.focus();const sel=getSelection();sel?.selectAllChildren(el);}});
 }
 function addCanvasImageObject(src,name,x=220,y=220,asset={}){
   const ctx=currentCanvasState();if(!ctx)return;asset=Object.keys(asset).length?asset:(ctx.w.mediaLibrary||[]).find(item=>(item.url||item.src)===src)||{};syncCanvasDomToState();editorRoot.begin('create image');const id=`image-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,z=Math.max(0,...ctx.canvas.objects.map(o=>Number(o.z)||0))+1;ctx.canvas.objects.push(normalizeMediaObject({id,x,y,width:280,height:220,zIndex:z,rotation:0,assetId:asset.assetId||'',assetPath:asset.storagePath||'',url:String(src||''),alt:String(name||'Фото'),caption:'',layoutMode:'free',wrapMode:'around',fit:'cover',radius:0,opacity:1,gap:14,locked:false},ctx.page.id));update(s=>s.ui.canvasSelectedObjectId=id,{persist:false});editorRoot.commit();save();render();
 }
-function deleteSelectedCanvasObject(){if(!selectedCanvasObject)return;const id=selectedCanvasObject.dataset.objectId,ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();editorRoot.begin('delete');ctx.canvas.objects=ctx.canvas.objects.filter(o=>o.id!==id);update(s=>s.ui.canvasSelectedObjectId=null,{persist:false});selectedCanvasObject=null;editorRoot.commit();save();render();}
+function deleteSelectedCanvasObject(){if(!selectedCanvasObject){showFeedback('Сначала выберите объект');return;}const id=selectedCanvasObject.dataset.objectId,ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();editorRoot.begin('delete');ctx.canvas.objects=ctx.canvas.objects.filter(o=>o.id!==id);removeDanglingConnections(ctx.canvas);update(s=>s.ui.canvasSelectedObjectId=null,{persist:false});selectedCanvasObject=null;editorRoot.commit();save();render();}
 function duplicateSelectedCanvasObject(){if(!selectedCanvasObject)return;const id=selectedCanvasObject.dataset.objectId,ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();editorRoot.begin('duplicate');const source=ctx.canvas.objects.find(o=>o.id===id);if(!source)return;const clone=structuredClone(source);clone.id=`${source.type}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;clone.x=clampCanvas((source.x||0)+28,0,PAGE_CANVAS_W-(source.w||100));clone.y=clampCanvas((source.y||0)+28,0,PAGE_CANVAS_H-(source.h||100));clone.z=Math.max(0,...ctx.canvas.objects.map(o=>Number(o.z)||0))+1;if(clone.type==='image')clone.zIndex=clone.z;ctx.canvas.objects.push(clone);update(s=>s.ui.canvasSelectedObjectId=clone.id,{persist:false});editorRoot.commit();save();render();}
 function setCanvasLayer(mode){if(!selectedCanvasObject)return;editorRoot.begin('layer');const canvas=selectedCanvasObject.closest('#freePageCanvas');if(!canvas)return;const objects=[...canvas.querySelectorAll(':scope > .canvas-object')].sort((a,b)=>(Number(a.dataset.z)||0)-(Number(b.dataset.z)||0));let i=objects.indexOf(selectedCanvasObject);if(i<0)return;let j=i;if(mode==='front')j=objects.length-1;else if(mode==='back')j=0;else if(mode==='forward')j=Math.min(objects.length-1,i+1);else if(mode==='backward')j=Math.max(0,i-1);objects.splice(i,1);objects.splice(j,0,selectedCanvasObject);objects.forEach((o,k)=>{o.dataset.z=String(k+1);o.style.zIndex=String(k+1);});syncCanvasDomToState();editorRoot.commit();save();}
 function toggleCanvasLock(){if(!selectedCanvasObject)return;editorRoot.begin('lock');selectedCanvasObject.dataset.locked=selectedCanvasObject.dataset.locked==='1'?'0':'1';selectedCanvasObject.classList.toggle('is-locked',selectedCanvasObject.dataset.locked==='1');syncCanvasDomToState();editorRoot.commit();save();updateCanvasInspector();}
@@ -698,7 +717,10 @@ function updateEditorWordCount(){
 function execEditorCommand(cmd,value=null){
   const ed=restoreEditorSelection(); if(!ed){notify('Сначала поставьте курсор в текст');return;}
   ed.focus();
-  try{document.execCommand('styleWithCSS',false,true);document.execCommand(cmd,false,value);}catch{}
+  syncCanvasDomToState();editorRoot.begin(`format ${cmd}`);
+  try{document.execCommand('styleWithCSS',false,true);if(!document.execCommand(cmd,false,value))showFeedback('Команда недоступна для текущего выделения');}
+  catch(error){showFeedback(`Не удалось применить форматирование: ${error.message}`,{kind:'error'});}
+  syncCanvasDomToState();editorRoot.commit();
   rememberEditorSelection();updateEditorWordCount();scheduleStudioAutosave();syncEditorToolbar();
 }
 function selectedBlocks(ed){
@@ -710,8 +732,10 @@ function selectedBlocks(ed){
 }
 function applyFontSize(px){
   const ed=restoreEditorSelection();if(!ed)return;
-  ed.focus();try{document.execCommand('styleWithCSS',false,false);document.execCommand('fontSize',false,'7');}catch{}
-  ed.querySelectorAll('font[size="7"]').forEach(font=>{font.removeAttribute('size');font.style.fontSize=`${px}px`;});
+  ed.focus();syncCanvasDomToState();editorRoot.begin('font size');
+  try{document.execCommand('styleWithCSS',false,false);document.execCommand('fontSize',false,'7');}catch(error){showFeedback(`Размер шрифта не изменён: ${error.message}`,{kind:'error'});}
+  ed.querySelectorAll('font[size="7"]').forEach(font=>{const span=document.createElement('span');span.style.fontSize=`${px}px`;span.append(...font.childNodes);font.replaceWith(span);});
+  syncCanvasDomToState();editorRoot.commit();
   rememberEditorSelection();scheduleStudioAutosave();
 }
 function applyEditorTool(tool,value){
@@ -720,9 +744,9 @@ function applyEditorTool(tool,value){
   if(tool==='fontFamily')execEditorCommand('fontName',value);
   else if(tool==='fontSize')applyFontSize(Number(value)||16);
   else if(tool==='color')execEditorCommand('foreColor',value);
-  else if(tool==='backgroundColor'){try{document.execCommand('hiliteColor',false,value);}catch{document.execCommand('backColor',false,value);}rememberEditorSelection();scheduleStudioAutosave();}
+  else if(tool==='backgroundColor')execEditorCommand('hiliteColor',value);
   else if(tool==='block')execEditorCommand('formatBlock',value);
-  else if(tool==='lineHeight'){selectedBlocks(ed).forEach(el=>el.style.lineHeight=String(value));rememberEditorSelection();scheduleStudioAutosave();}
+  else if(tool==='lineHeight'){syncCanvasDomToState();editorRoot.begin('line height');selectedBlocks(ed).forEach(el=>el.style.lineHeight=String(value));syncCanvasDomToState();editorRoot.commit();rememberEditorSelection();scheduleStudioAutosave();}
   syncEditorToolbar();
 }
 function syncEditorToolbar(){
@@ -746,6 +770,27 @@ function syncDocumentPages(){
   if(editors.length)w.documentPages=editors.map((el,i)=>normalizePageMedia({id:w.documentPages?.[i]?.id||`doc-${Date.now()}-${i}`,html:cleanEditorHtml(el)}));
 }
 function syncStudioEditor(){ syncCurrentBookPage(); syncDocumentPages(); }
+
+function requestStudioPageDeletion(index){
+  syncStudioEditor();const ctx=currentCanvasState();if(!ctx)return;
+  const pages=workPages(ctx.w),page=pages[index];
+  if(!page)throw new Error('Страница не найдена');
+  if(['cover','title'].includes(page.type)||pages.length<=1)throw new Error('Эту страницу нельзя удалить');
+  if(pageHasContent(page)){
+    openModal(`<h2>Удалить страницу ${index+1}?</h2><p>На странице есть содержимое или связи. Удаление страницы не удаляет файлы проекта.</p><div class="actions"><button type="button" data-action="close-modal">Отмена</button><button type="button" class="danger" data-action="confirm-delete-studio-page" data-work="${esc(ctx.w.id)}" data-page="${esc(page.id)}">Удалить страницу</button></div>`);return;
+  }
+  confirmStudioPageDeletion(ctx.w.id,page.id);
+}
+function confirmStudioPageDeletion(workId,pageId){
+  const work=state.works.find(item=>item.id===workId);if(!work)throw new Error('Проект недоступен');
+  const index=workPages(work).findIndex(page=>page.id===pageId);
+  const selected=workPages(work)[state.ui.bookPageIndex||0]?.id;
+  const next=removeStudioPage(work,index);
+  state.ui.bookPageIndex=selected===pageId?next:Math.max(0,workPages(work).findIndex(page=>page.id===selected));
+  state.ui.bookSpreadIndex=Math.min(state.ui.bookSpreadIndex||0,workPages(work).length-1);
+  state.ui.canvasSelectedObjectId=null;state.ui.modal=null;
+  save();rememberNavigationScroll();render();scheduleStudioAutosave();
+}
 function textFromHtml(html){const d=document.createElement('div');d.innerHTML=html||'';return (d.innerText||'').trim();}
 function insertMedia(src,name){
   if(document.querySelector('#freePageCanvas')){const asset=currentCanvasState()?.w.mediaLibrary?.find(item=>(item.url||item.src)===src)||{};addCanvasImageObject(src,name,220,220,asset);return;}
@@ -795,7 +840,7 @@ function startCreateProject(type,mode){
   update(s=>{
     const blank={id,authorId:s.user.id,author:s.user.name,title:'Без названия',kind:type==='fragment'?'Фрагмент':'Роман',genres:[],summary:'',cover:'/assets/home/reading-cover.png',version:'0.1',rating:0,ratingsCount:0,authorActivity:20,createdAt:new Date().toISOString(),minutes:2,publicationStatus:'draft',evaluationStatus:'closed',status:'draft',targetType:'Фрагмент',evaluationTarget:'Фрагмент',evaluationText:'',feedbackWanted:[],content:'',creationType:type,writingStatus:type==='draft'?'draft':'writing',editorMode:mode,documentPages:[{id:'doc-'+Date.now(),html:'<p><br></p>'}],bookPages:[makeCanvasPage('cover','Без названия',s.user.name),makeCanvasPage('title','Без названия',s.user.name),makeCanvasPage('content','Без названия',s.user.name)],mediaLibrary:[]};
     s.works.unshift(blank);s.ui.selectedStudioWorkId=id;s.ui.createDraftType=null;s.ui.bookPageIndex=0;s.ui.bookViewMode=false;s.ui.bookSpreadIndex=0;s.ui.page='create';
-  }); render();
+  }); rememberNavigationScroll();render();
 }
 function cleanIdentifier(method,value){
   const raw=String(value||'').trim();
@@ -1124,7 +1169,7 @@ app.addEventListener('click',withOperation(async e=>{
   if(action==='cancel-otp'){otpPending=null;render();return;}
   if(action==='resend-otp'){return resendOtp();}
   if(action==='cloud-login'){forceAuthScreen=true;loginMode=true;signupRole=null;otpPending=null;render();return;}
-  if(action==='launch-game'){try{await openFraktumGame();notify('FRAKTUM TCG открыт с вашим единым аккаунтом');}catch(error){notify(error instanceof Error?error.message:String(error));}return;}
+
   if(action==='cloud-logout'){stopCloudPolling();if(activeRtc)await finishLocalCall(false);try{await signOut();}finally{update(s=>{s.user=null;s.posts=[];s.chatThreads=[];s.peopleDirectory=[];s.friends=[];s.cloud={...(s.cloud||{}),connected:false};},{persist:false});loginMode=true;forceAuthScreen=false;render();}return;}
   if(action==='back-onboarding'){signupRole=null;otpPending=null;render();return;}
   if(action==='navigate'){if(el.dataset.page==='admin')await refreshAdminData(false);if(el.dataset.page==='feedback')await refreshAuthorFeedback();return go(el.dataset.page);}
@@ -1180,12 +1225,15 @@ app.addEventListener('click',withOperation(async e=>{
   if(action==='reader-book-prev'){animateBookTurn({reader:true,direction:-1});return;}
   if(action==='studio-focus-media'){document.querySelector('#studioMediaPanel')?.scrollIntoView({behavior:'smooth',block:'start'});return;}
   if(action==='studio-toggle-grid'){update(s=>s.ui.studioGrid=!s.ui.studioGrid,{persist:false});document.querySelector('.word-canvas')?.classList.toggle('show-page-grid',!!state.ui.studioGrid);document.querySelector('#freePageCanvas')?.classList.toggle('show-canvas-grid',!!state.ui.studioGrid);return;}
-  if(action==='editor-cmd'){execEditorCommand(el.dataset.cmd,el.dataset.value||null);return;}
+  if(action==='editor-cmd'){el.dataset.cmd==='undo'?editorRoot.undo():el.dataset.cmd==='redo'?editorRoot.redo():execEditorCommand(el.dataset.cmd,el.dataset.value||null);return;}
   if(action==='editor-link'){const url=prompt('Ссылка (https://...)');if(url)execEditorCommand('createLink',url);return;}
   if(action==='restore-legacy-media'){await restoreLegacyMedia();return;}
   if(action==='insert-media'){insertMedia(el.dataset.src,el.dataset.name);return;}
   if(action==='canvas-add-text'){const c=document.querySelector('#freePageCanvas');addCanvasTextObject('text',c?PAGE_CANVAS_W*.18:110,c?PAGE_CANVAS_H*.16:150);return;}
   if(action==='canvas-add-note'){addCanvasTextObject('note',120,180);return;}
+  if(action==='canvas-add-card'){addCanvasTextObject('card',160,220);return;}
+  if(action==='canvas-move'){showFeedback('Перетаскивайте объект или перемещайте его клавишами со стрелками.');return;}
+  if(action==='connection-start'||action==='connection-select'||action==='connection-delete'||action==='connection-reverse'||action==='connection-cancel')return studioConnections.handleAction(action,el);
   if(action==='insert-canvas-media'){addCanvasImageObject(el.dataset.src,el.dataset.name);return;}
   if(action==='set-page-background'){setPageBackgroundImage(el.dataset.src);return;}
   if(action==='clear-page-background'){clearPageBackgroundImage();return;}
@@ -1198,13 +1246,14 @@ app.addEventListener('click',withOperation(async e=>{
   if(action==='media-caption-toggle'){toggleMediaCaption();return;}
   if(action==='media-reset'){resetMediaPosition();return;}
   if(action==='delete-media'){if(selectedMediaFigure){selectedMediaFigure.remove();selectedMediaFigure=null;syncStudioEditor();save();updateEditorWordCount();}else notify('Сначала нажмите на картинку в тексте');return;}
-  if(action==='book-page-select'){syncCurrentBookPage();const idx=Number(el.dataset.index)||0;update(s=>{s.ui.bookPageIndex=idx;s.ui.canvasSelectedObjectId=null;if(s.ui.bookViewMode)s.ui.bookSpreadIndex=idx===0?0:(idx%2===1?idx:idx-1);},{persist:false});render();return;}
-  if(action==='book-page-prev'){syncCurrentBookPage();update(s=>{s.ui.bookPageIndex=Math.max(0,(s.ui.bookPageIndex||0)-1);s.ui.canvasSelectedObjectId=null;},{persist:false});render();return;}
-  if(action==='book-page-next'){syncCurrentBookPage();const w=state.works.find(x=>x.id===document.querySelector('#workEditor')?.dataset.id);update(s=>{s.ui.bookPageIndex=Math.min(Math.max(0,(w?workPages(w).length:1)-1),(s.ui.bookPageIndex||0)+1);s.ui.canvasSelectedObjectId=null;},{persist:false});render();return;}
-  if(action==='add-book-page'){syncCurrentBookPage();const id=document.querySelector('#workEditor')?.dataset.id;update(s=>{const w=s.works.find(x=>x.id===id);if(w){const page=makeCanvasPage('content',w.title,w.author||s.user?.name||'');page.label=`Страница ${Math.max(1,w.bookPages.length-1)}`;w.bookPages.push(page);s.ui.bookPageIndex=w.bookPages.length-1;s.ui.bookViewMode=false;s.ui.canvasSelectedObjectId=null;}});render();return;}
-  if(action==='delete-book-page'){syncCurrentBookPage();const id=document.querySelector('#workEditor')?.dataset.id;const idx=Number(el.dataset.index);update(s=>{const w=s.works.find(x=>x.id===id);if(!w||!w.bookPages?.[idx]||w.bookPages[idx].type!=='content')return;w.bookPages.splice(idx,1);s.ui.bookPageIndex=Math.max(0,Math.min(idx-1,w.bookPages.length-1));s.ui.bookSpreadIndex=Math.max(0,Math.min(s.ui.bookSpreadIndex||0,w.bookPages.length-1));});render();return;}
-  if(action==='add-document-page'){syncDocumentPages();const id=document.querySelector('#workEditor')?.dataset.id;update(s=>{const w=s.works.find(x=>x.id===id);if(w){w.documentPages.push(normalizePageMedia({id:'doc-'+crypto.randomUUID(),html:'<p><br></p>'}));s.ui.bookPageIndex=w.documentPages.length-1;s.ui.canvasSelectedObjectId=null;}});render();return;}
-  if(action==='studio-select'){syncStudioEditor();update(s=>{s.ui.selectedStudioWorkId=el.dataset.id;s.ui.page='create';s.ui.bookPageIndex=0;s.ui.bookViewMode=false;s.ui.bookSpreadIndex=0;s.ui.canvasSelectedObjectId=null;},{persist:false});render();return;}
+  if(action==='book-page-select'){syncCurrentBookPage();const idx=Number(el.dataset.index)||0;update(s=>{s.ui.bookPageIndex=idx;s.ui.canvasSelectedObjectId=null;if(s.ui.bookViewMode)s.ui.bookSpreadIndex=idx===0?0:(idx%2===1?idx:idx-1);},{persist:true});rememberNavigationScroll();render();return;}
+  if(action==='book-page-prev'){syncCurrentBookPage();update(s=>{s.ui.bookPageIndex=Math.max(0,(s.ui.bookPageIndex||0)-1);s.ui.canvasSelectedObjectId=null;},{persist:true});rememberNavigationScroll();render();return;}
+  if(action==='book-page-next'){syncCurrentBookPage();const w=state.works.find(x=>x.id===document.querySelector('#workEditor')?.dataset.id);update(s=>{s.ui.bookPageIndex=Math.min(Math.max(0,(w?workPages(w).length:1)-1),(s.ui.bookPageIndex||0)+1);s.ui.canvasSelectedObjectId=null;},{persist:true});rememberNavigationScroll();render();return;}
+  if(action==='add-book-page'){syncCurrentBookPage();const id=document.querySelector('#workEditor')?.dataset.id;update(s=>{const w=s.works.find(x=>x.id===id);if(w){const page=makeCanvasPage('content',w.title,w.author||s.user?.name||'');page.label=`Страница ${Math.max(1,w.bookPages.length-1)}`;w.bookPages.push(page);s.ui.bookPageIndex=w.bookPages.length-1;s.ui.bookViewMode=false;s.ui.canvasSelectedObjectId=null;}});rememberNavigationScroll();render();scheduleStudioAutosave();return;}
+  if(action==='delete-book-page'||action==='delete-studio-page')return requestStudioPageDeletion(Number(el.dataset.index));
+  if(action==='confirm-delete-studio-page')return confirmStudioPageDeletion(el.dataset.work,el.dataset.page);
+  if(action==='add-document-page'){syncDocumentPages();const id=document.querySelector('#workEditor')?.dataset.id;update(s=>{const w=s.works.find(x=>x.id===id);if(w){w.documentPages.push(normalizePageMedia({id:'doc-'+crypto.randomUUID(),html:'<p><br></p>'}));s.ui.bookPageIndex=w.documentPages.length-1;s.ui.canvasSelectedObjectId=null;}});rememberNavigationScroll();render();scheduleStudioAutosave();return;}
+  if(action==='studio-select'){syncStudioEditor();update(s=>{s.ui.selectedStudioWorkId=el.dataset.id;s.ui.page='create';s.ui.bookPageIndex=0;s.ui.bookViewMode=false;s.ui.bookSpreadIndex=0;s.ui.canvasSelectedObjectId=null;},{persist:true});rememberNavigationScroll();render();return;}
   if(action==='save-work') return saveWork('draft');
   if(action==='publish-work') return saveWork('published');
   if(action==='open-publish-checklist') return publishChecklistDialog();
@@ -1515,28 +1564,31 @@ async function saveWork(mode='draft'){
     const w=s.works.find(z=>z.id===x.id); if(!w)return;
     Object.assign(w,{title:x.title,kind:x.kind,genres:x.genres,summary:x.summary,targetType:x.targetType,evaluationTarget:x.evaluationTarget,evaluationText:x.evaluationText,feedbackWanted:x.feedbackWanted,formatId:x.formatId,genreIds:x.genreIds,audienceIds:x.audienceIds,tagIds:x.tagIds,content:x.content,minutes:Math.max(1,Math.ceil(x.content.length/900))});
     if(w.editorMode==='book'){const cover=w.bookPages?.find(p=>p.type==='cover');const title=w.bookPages?.find(p=>p.type==='title');if(cover){cover.title=w.title;cover.author=w.author;}if(title){title.title=w.title;title.author=w.author;}if(cover?.canvas?.background?.image)w.cover=cover.canvas.background.image;}
-    if(mode==='published'&&!fragment){const first=w.publicationStatus!=='published';w.publicationStatus='published';w.publishedAt=w.publishedAt||new Date().toISOString();if(first)s.user.xp+=10;}
-    if(mode==='evaluation'){const first=w.evaluationStatus!=='open';w.evaluationStatus='open';w.evaluationOpenedAt=new Date().toISOString();if(first)s.user.xp+=5;w.authorActivity=(w.authorActivity||0)+3;}
     w.status=w.evaluationStatus==='open'?'evaluation':w.publicationStatus==='published'?'published':'draft';
   });
   const local=state.works.find(z=>z.id===x.id);
   if(isCloudAuthenticated()&&state.user?.role==='author'&&state.user?.verified&&local){
     try{
       const result=await persistStudioWork(local,mode);
-      if(result.fragment){notify(mode==='evaluation'?'Фрагмент опубликован для оценки':'Фрагмент сохранён');return;}
-      await saveCloudWorkTaxonomy(result.work.id,{formatId:x.formatId,genreIds:x.genreIds,audienceIds:x.audienceIds,tagIds:x.tagIds});
+      if(!result.fragment)await saveCloudWorkTaxonomy(result.work.id,{formatId:x.formatId,genreIds:x.genreIds,audienceIds:x.audienceIds,tagIds:x.tagIds});
+      update(()=>{
+        if(mode==='published'&&!fragment){local.publicationStatus='published';local.publishedAt=local.publishedAt||new Date().toISOString();}
+        if(mode==='evaluation'){local.evaluationStatus='open';local.evaluationOpenedAt=new Date().toISOString();}
+        local.status=local.evaluationStatus==='open'?'evaluation':local.publicationStatus==='published'?'published':'draft';
+      });
     }catch(err){showFeedback(`Локально сохранено, но Supabase не синхронизирован: ${err.message}`);return;}
-  }
+  }else{showFeedback(mode==='draft'?'Черновик сохранён на устройстве':'Для публикации нужна действующая сессия подтверждённого автора. Текст сохранён на устройстве.',{kind:mode==='draft'?'status':'error'});return;}
   const msg=mode==='published'?'Произведение опубликовано в разделе «Читать»':mode==='evaluation'?'Текст опубликован в разделе «Оценить»':'Черновик сохранён'; notify(msg);
 }
 
-function closeEvaluation(){
+async function closeEvaluation(){
   syncStudioEditor();const id=document.querySelector('#workEditor')?.dataset.id;const w=state.works.find(x=>x.id===id);if(!w)return;
-  update(s=>{w.evaluationStatus='closed';w.status=w.publicationStatus==='published'?'published':'draft';});notify('Приём новых оценок закрыт. Старые рецензии сохранены.');
+  try{await persistStudioWork(w,'draft',{evaluationStatus:'closed'});update(()=>{w.evaluationStatus='closed';w.status=w.publicationStatus==='published'?'published':'draft';});notify('Приём новых оценок закрыт. Старые рецензии сохранены.');}
+  catch(error){showFeedback(`Не удалось закрыть оценку: ${error.message}`,{kind:'error'});}
 }
 function newVersion(){
   syncStudioEditor();const id=document.querySelector('#workEditor')?.dataset.id;const w=state.works.find(x=>x.id===id);if(!w)return;const [a,b]=w.version.split('.').map(Number);
-  update(s=>{w.version=`${a}.${(b||0)+1}`;w.cloudVersionId=null;w.publicationStatus='draft';w.evaluationStatus='closed';w.status='draft';});notify('Создана новая версия. Старые отзывы остались у предыдущей версии.');
+  update(s=>{w.version=`${a}.${(b||0)+1}`;w.cloudVersionId=null;w.publicationStatus='draft';w.evaluationStatus='closed';w.status='draft';});notify('Создана новая версия. Сохраняем в облаке…');scheduleStudioAutosave();
 }
 
 function profileDialog(){openModal(profileEditor(state.user,state.catalogs||{genres:[],topics:[]}), 'wide');}

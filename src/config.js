@@ -10,6 +10,5 @@ export const config=Object.freeze({
   supabaseUrl,
   supabasePublishableKey,
   pushPublicKey:String(runtime.VITE_PUSH_PUBLIC_KEY||'').trim(),
-  gameUrl:String(runtime.VITE_FRAKTUM_GAME_URL||'https://fraktum-tcg-main.vercel.app').trim().replace(/\/$/,''),
   demoEnabled:String(runtime.VITE_ENABLE_DEMO_DATA||'false').toLowerCase()==='true'
 });

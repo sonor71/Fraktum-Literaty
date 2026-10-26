@@ -1,4 +1,5 @@
 import {hasLegacyRecovery,preserveLegacyImage} from './LegacyMediaRecovery.js';
+import {normalizeConnections} from './ConnectionModel.js';
 /** One durable image model shared by every editor and reader surface. */
 export const PAGE_WIDTH=760;
 export const PAGE_HEIGHT=1080;
@@ -67,6 +68,7 @@ export function normalizePageMedia(page){
     return object;
   });
   page.canvas.objects.push(...migratedImages);
+  page.canvas.connections=normalizeConnections(page.canvas.connections,page.canvas.objects);
   page.html=page.canvas.objects.filter(object=>object.type==='text').map(object=>object.html||'').join('');
   if(page.canvas.background?.image){const key=preserveLegacyImage(page.canvas.background.image);if(key)page.canvas.background.backgroundRecoveryKey=key;page.canvas.background.image=durableImageUrl(page.canvas.background.image);}
   return page;

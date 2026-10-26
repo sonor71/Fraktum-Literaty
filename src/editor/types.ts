@@ -60,6 +60,16 @@ export interface CanvasPage {
   height: number;
   background: PageBackground;
   objects: CanvasObject[];
+  connections: CanvasConnection[];
+}
+
+export interface CanvasConnection {
+  id: string;
+  fromObjectId: string;
+  toObjectId: string;
+  type: 'cause' | 'relation' | 'dependency' | 'hypothesis';
+  label: string;
+  style: {width: number; dash: boolean};
 }
 
 export interface BookDocument {

@@ -76,9 +76,9 @@ for(const {type,mode,width} of [{type:'work',mode:'document',width:1366},{type:'
     const restored=await imageModel(page);
     assert.equal(restored.assetPath,saved.assetPath);assert.equal(restored.width,saved.width);assert.equal(restored.y,saved.y);assert.equal(restored.caption,'Сохранённая подпись');
     await page.locator('#freePageCanvas > .canvas-image-object').click();
-    await page.locator('[data-action="canvas-duplicate"]').click();
+    await page.locator('.canvas-selection-toolbar [data-action="canvas-duplicate"]').click();
     assert.equal(await page.locator('#freePageCanvas > .canvas-image-object').count(),2);
-    await page.locator('[data-action="canvas-delete"]').click();
+    await page.locator('.canvas-selection-toolbar [data-action="canvas-delete"]').click();
     assert.equal(await page.locator('#freePageCanvas > .canvas-image-object').count(),1);
     const other=await harness.scenario(t,{fixture});
     await other.page.locator('.menu-toggle').click();
