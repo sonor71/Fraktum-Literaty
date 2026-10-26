@@ -162,7 +162,12 @@ test('published reader, new version, project switches and closing evaluation ret
   fixture.tables.lit_profiles.push({...fixture.tables.lit_profiles[0],id:readerId,username:'other-reader',account_role:'reader',author_verified:false});
   const reader=await harness.scenario(t,{fixture:{...fixture,session:{...fixture.session,user:{...fixture.session.user,id:readerId}}},path:'/#/read'});
   await reader.page.locator('[data-action="start-reading"]').first().click();await reader.page.locator('[data-action="reader-book-next"]').first().click();
-  await reader.page.locator('.composition-reader .connection-line').waitFor();
+  const readerLine=reader.page.locator('.composition-reader .connection-line');
+  await readerLine.waitFor({state:'attached'});
+  const painted=await readerLine.evaluate(path=>{const bounds=path.closest('svg').getBoundingClientRect(),style=getComputedStyle(path);return {width:bounds.width,height:bounds.height,length:path.getTotalLength(),stroke:style.stroke,strokeWidth:parseFloat(style.strokeWidth)};});
+  // A horizontal SVG path has a zero-height geometric bounding box. Check its
+  // visible SVG viewport and painted stroke rather than HTML box visibility.
+  assert.ok(painted.width>0&&painted.height>0&&painted.length>0&&painted.stroke!=='none'&&painted.strokeWidth>0,JSON.stringify(painted));
   assert.equal(await reader.page.locator('.composition-reader [data-action],.composition-reader .canvas-object-chrome').count(),0);
   clean(reader);
   await page.locator('[data-action="new-version"]').click();await saved(page);
