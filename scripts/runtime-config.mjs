@@ -6,7 +6,11 @@ export const PUBLIC_RUNTIME_KEYS = [
   'VITE_SUPABASE_PUBLISHABLE_KEY',
   'VITE_PUSH_PUBLIC_KEY',
   'VITE_FRAKTUM_GAME_URL',
-  'VITE_ENABLE_DEMO_DATA'
+  'VITE_ENABLE_DEMO_DATA',
+  'VITE_TURN_URL',
+  'VITE_TURN_USERNAME',
+  'VITE_TURN_CREDENTIAL',
+  'VITE_RTC_DEBUG'
 ];
 
 function cleanValue(value) {
@@ -66,6 +70,16 @@ export function createRuntimeConfig(environment) {
     throw new Error('Invalid VITE_SUPABASE_PUBLISHABLE_KEY: expected an sb_publishable_ key or legacy anon JWT');
   }
   config.VITE_ENABLE_DEMO_DATA = String(config.VITE_ENABLE_DEMO_DATA).toLowerCase() === 'true' ? 'true' : 'false';
+  config.VITE_RTC_DEBUG = String(config.VITE_RTC_DEBUG).toLowerCase() === 'true' ? 'true' : 'false';
+  const turnConfigured=['VITE_TURN_URL','VITE_TURN_USERNAME','VITE_TURN_CREDENTIAL'].some(key=>config[key]);
+  if(turnConfigured){
+    for(const key of ['VITE_TURN_URL','VITE_TURN_USERNAME','VITE_TURN_CREDENTIAL']){
+      if(!config[key])throw new Error(`Missing required TURN environment variable: ${key}`);
+    }
+    if(config.VITE_TURN_URL.split(/[\s,]+/).filter(Boolean).some(url=>!/^turns?:[^\s/?]+(?::\d+)?(?:\?transport=(?:udp|tcp))?$/i.test(url))){
+      throw new Error('Invalid VITE_TURN_URL: expected turn: or turns: URLs');
+    }
+  }
   return config;
 }
 

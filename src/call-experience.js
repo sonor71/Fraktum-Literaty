@@ -10,6 +10,14 @@ let outgoingPendingTimer = null;
 let notificationPromptShown = false;
 let soundUnlockPromptShown = false;
 let soundGeneration = 0;
+const activeTones = new Set();
+let silencedIncomingId = null;
+
+function reportAudioError(operation, error) {
+  if (String(globalThis.__FRAKTUM_CONFIG__?.VITE_RTC_DEBUG) === 'true') {
+    console.debug('[FRAKTUM call audio]', operation, error?.name || 'Error', error?.message || String(error));
+  }
+}
 
 function getAudioContext() {
   if (!AUDIO_CTX) return null;
@@ -18,9 +26,9 @@ function getAudioContext() {
 }
 
 async function unlockAudio() {
-  const ctx = getAudioContext();
-  if (!ctx) return false;
   try {
+    const ctx = getAudioContext();
+    if (!ctx) return false;
     if (ctx.state === 'suspended') await ctx.resume();
     if (ctx.state !== 'running') return false;
     const osc = ctx.createOscillator();
@@ -31,7 +39,7 @@ async function unlockAudio() {
     osc.stop(ctx.currentTime + 0.025);
     return true;
   } catch (error) {
-    console.warn('FRAKTUM call audio unlock failed', error);
+    reportAudioError('unlock', error);
     return false;
   }
 }
@@ -50,6 +58,12 @@ function playTone(freq, durationMs, volume = 0.1, type = 'sine', delayMs = 0) {
   gain.gain.setValueAtTime(Math.max(0.0002, volume), Math.max(start + 0.04, end - 0.07));
   gain.gain.exponentialRampToValueAtTime(0.0001, end);
   osc.connect(gain).connect(ctx.destination);
+  activeTones.add(osc);
+  osc.onended = () => {
+    activeTones.delete(osc);
+    osc.disconnect();
+    gain.disconnect();
+  };
   osc.start(start);
   osc.stop(end + 0.03);
   return true;
@@ -123,6 +137,10 @@ function stopCallSound() {
   if (soundTimer) clearTimeout(soundTimer);
   soundTimer = null;
   soundMode = null;
+  for (const tone of activeTones) {
+    try { tone.stop(); } catch (error) { reportAudioError('stop tone', error); }
+  }
+  activeTones.clear();
   removeSoundUnlockPrompt();
 }
 
@@ -153,7 +171,7 @@ async function startCallSound(mode) {
 }
 
 // Unlock as early as possible after any real user interaction.
-const prime = () => { unlockAudio().catch(() => {}); };
+const prime = () => { void unlockAudio(); };
 document.addEventListener('pointerdown', prime, { capture: true });
 document.addEventListener('touchstart', prime, { capture: true, passive: true });
 document.addEventListener('keydown', prime, { capture: true });
@@ -175,7 +193,18 @@ function showNotificationOptIn() {
   document.body.appendChild(box);
   box.querySelector('#fraktumCallNotifyLater')?.addEventListener('click', () => box.remove());
   box.querySelector('#fraktumCallNotifyEnable')?.addEventListener('click', async () => {
-    try { await window.Notification.requestPermission(); } catch {}
+    try {
+      const permission = await window.Notification.requestPermission();
+      if (permission !== 'granted') {
+        box.querySelector('div').textContent = 'Уведомления не разрешены. Входящие звонки доступны в открытой вкладке.';
+        box.querySelector('#fraktumCallNotifyEnable').disabled = true;
+        return;
+      }
+    } catch (error) {
+      reportAudioError('notification permission', error);
+      box.querySelector('div').textContent = 'Не удалось разрешить уведомления. Проверьте настройки браузера.';
+      return;
+    }
     await unlockAudio();
     box.remove();
   });
@@ -195,7 +224,7 @@ function notifyIncomingCall({ id, caller, mode }) {
     });
     n.onclick = () => { window.focus(); n.close(); };
   } catch (error) {
-    console.warn('FRAKTUM call notification failed', error);
+    reportAudioError('incoming notification', error);
   }
 }
 
@@ -204,10 +233,12 @@ function detectIncomingCall() {
   if (!modal) {
     if (currentIncomingId && soundMode === 'incoming') stopCallSound();
     currentIncomingId = null;
+    silencedIncomingId = null;
     return;
   }
   const actionButton = modal.querySelector('[data-action="accept-cloud-call"], [data-action="decline-cloud-call"]');
   const id = actionButton?.dataset.id || 'incoming';
+  if (silencedIncomingId === id) return;
   if (currentIncomingId === id) return;
   currentIncomingId = id;
   const caller = modal.querySelector('h2')?.textContent?.trim() || 'Пользователь';
@@ -220,16 +251,23 @@ function detectIncomingCall() {
 function detectOutgoingCall() {
   const overlay = document.querySelector('#realCallOverlay');
   const status = document.querySelector('#realCallStatus')?.textContent?.trim() || '';
+  const state = overlay?.dataset.callState;
+  const stopped = ['connected', 'failed', 'ended', 'declined'].includes(state)
+    || ['Подключено', 'Нет соединения', 'Завершён', 'Соединено', 'Звонок отклонён', 'Звонок завершён', 'Связь прервана'].includes(status);
+  if (stopped || (!overlay && outgoingActive)) {
+    outgoingPending = false;
+    outgoingActive = false;
+    if (outgoingPendingTimer) clearTimeout(outgoingPendingTimer);
+    outgoingPendingTimer = null;
+    if (soundMode === 'outgoing') stopCallSound();
+    return;
+  }
   if (outgoingPending && overlay && !outgoingActive) {
     outgoingPending = false;
     outgoingActive = true;
     if (outgoingPendingTimer) clearTimeout(outgoingPendingTimer);
     outgoingPendingTimer = null;
     startCallSound('outgoing');
-  }
-  if (outgoingActive && (!overlay || ['Соединено', 'Звонок отклонён', 'Звонок завершён', 'Связь прервана'].includes(status))) {
-    outgoingActive = false;
-    if (soundMode === 'outgoing') stopCallSound();
   }
 }
 
@@ -244,7 +282,6 @@ document.addEventListener('click', async (event) => {
   const action = target.dataset?.action;
 
   if (action === 'start-call') {
-    await unlockAudio();
     outgoingPending = true;
     outgoingActive = false;
     if (outgoingPendingTimer) clearTimeout(outgoingPendingTimer);
@@ -252,10 +289,12 @@ document.addEventListener('click', async (event) => {
       if (outgoingPending && !document.querySelector('#realCallOverlay')) outgoingPending = false;
     }, 12000);
     showNotificationOptIn();
+    await unlockAudio();
+    scanCallUi();
   }
 
   if (action === 'accept-cloud-call' || action === 'decline-cloud-call') {
-    currentIncomingId = null;
+    silencedIncomingId = target.dataset.id || currentIncomingId;
     if (soundMode === 'incoming') stopCallSound();
   }
 
@@ -268,15 +307,43 @@ document.addEventListener('click', async (event) => {
     outgoingPending = false;
     outgoingActive = false;
     currentIncomingId = null;
+    if (outgoingPendingTimer) clearTimeout(outgoingPendingTimer);
+    outgoingPendingTimer = null;
     stopCallSound();
   }
 }, true);
 
-const observer = new window.MutationObserver(scanCallUi);
-observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
-setInterval(scanCallUi, 400);
+window.addEventListener('fraktum:callstate', event => {
+  const state = event.detail?.state;
+  if (['connected', 'failed', 'ended', 'declined'].includes(state)) {
+    outgoingPending = false;
+    outgoingActive = false;
+    if (outgoingPendingTimer) clearTimeout(outgoingPendingTimer);
+    outgoingPendingTimer = null;
+    stopCallSound();
+  }
+});
 
-window.addEventListener('pagehide', stopCallSound);
+const observer = new window.MutationObserver(scanCallUi);
+const observeOptions = { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['data-call-state'] };
+observer.observe(document.documentElement, observeOptions);
+let scanTimer = setInterval(scanCallUi, 400);
+
+window.addEventListener('pagehide', () => {
+  outgoingPending = false;
+  outgoingActive = false;
+  clearTimeout(outgoingPendingTimer);
+  outgoingPendingTimer = null;
+  clearInterval(scanTimer);
+  scanTimer = null;
+  observer.disconnect();
+  stopCallSound();
+});
+window.addEventListener('pageshow', () => {
+  if (scanTimer === null) scanTimer = setInterval(scanCallUi, 400);
+  observer.observe(document.documentElement, observeOptions);
+  scanCallUi();
+});
 window.addEventListener('beforeunload', stopCallSound);
 
 // Small debug API: useful in DevTools and harmless in production.

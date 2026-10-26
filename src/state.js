@@ -1,3 +1,6 @@
+import {durableImageUrl,normalizeMediaObject,normalizePageMedia} from './editor/MediaModel.js';
+import {hasLegacyRecovery,preserveLegacyImage} from './editor/LegacyMediaRecovery.js';
+import {assertPersistableDocument} from './editor/Serialization.js';
 const KEY='d20-platform-v4';
 
 function textToHtml(text){
@@ -24,7 +27,7 @@ function canvasForLegacyPage(page,work,index){
         z:Number.isFinite(Number(o.z))?Number(o.z):i+1,
         rotation:Number(o.rotation)||0,
         locked:!!o.locked,
-        ...(o.type==='image'?{src:o.src||'',alt:o.alt||'',fit:o.fit||'cover',radius:Number(o.radius)||0,opacity:o.opacity==null?1:Number(o.opacity),wrap:o.wrap||'auto',gap:Number(o.gap)||14}:{html:o.html||'<p><br></p>',flow:o.flow!==false,role:o.role||'',style:{fontFamily:'Georgia',fontSize:18,lineHeight:1.55,color:null,align:'left',background:'transparent',padding:6,...(o.style||{})}})
+        ...(o.type==='image'?normalizeMediaObject(o,p.id):{html:o.html||'<p><br></p>',flow:o.flow!==false,role:o.role||'',style:{fontFamily:'Georgia',fontSize:18,lineHeight:1.55,color:null,align:'left',background:'transparent',padding:6,...(o.style||{})}})
       }))
     };
   }
@@ -47,6 +50,7 @@ function canvasForLegacyPage(page,work,index){
 }
 function normalizeWork(work){
   const w={...work};
+  const coverRecoveryKey=preserveLegacyImage(w.cover);if(coverRecoveryKey){w.coverRecoveryKey=coverRecoveryKey;w.cover='';}
   if(!w.publicationStatus) w.publicationStatus=w.status==='draft'?'draft':'published';
   if(!w.evaluationStatus) w.evaluationStatus=w.status==='evaluation'?'open':'closed';
   if(!w.targetType) w.targetType=w.evaluationTarget==='Весь текст'?'Всё произведение':'Фрагмент';
@@ -61,8 +65,10 @@ function normalizeWork(work){
       {id:'page-'+(w.id||Date.now())+'-1',type:'content',html:textToHtml(w.content||'')}
     ];
   }
-  w.bookPages=w.bookPages.map((p,i)=>({...p,canvas:canvasForLegacyPage(p,w,i)}));
+  w.bookPages=w.bookPages.map((p,i)=>normalizePageMedia({...p,canvas:canvasForLegacyPage(p,w,i)}));
+  w.documentPages=w.documentPages.map(normalizePageMedia);
   if(!Array.isArray(w.mediaLibrary)) w.mediaLibrary=[];
+  w.mediaLibrary=w.mediaLibrary.map(asset=>{const legacyMediaKey=preserveLegacyImage(asset.url||asset.src);return legacyMediaKey?{...asset,legacyMediaKey,url:'',src:''}:{...asset,url:durableImageUrl(asset.url||asset.src),src:durableImageUrl(asset.url||asset.src)};});
   if(w.evaluationStatus==='open') w.status='evaluation';
   else w.status=w.publicationStatus==='published'?'published':'draft';
   return w;
@@ -141,8 +147,10 @@ export function loadState(){
 export let state=loadState();
 
 export function save(){
+  if(hasLegacyRecovery(state.works)){state.cloud.error='Восстановите старые изображения в облако. Исходный снимок на устройстве сохранён.';return;}
   const copy=structuredClone(state);
   copy.ui.modal=null; copy.ui.toast=null; copy.ui.selectedQuote='';
+  assertPersistableDocument(copy.works);
   localStorage.setItem(KEY,JSON.stringify(copy));
 }
 
