@@ -1,14 +1,16 @@
 import {HistoryManager} from './HistoryManager.js';
 
 /** Owns Book Studio history while the legacy shell remains responsible for routing. */
-export function createEditorRoot({readSnapshot,applySnapshot,onChange}){
+export function createEditorRoot({readSnapshot,applySnapshot,onChange,readContext=()=>null}){
   const history=new HistoryManager({apply:snapshot=>{applySnapshot(snapshot);onChange?.('history');}});
+  let context=readContext();
+  const syncContext=()=>{const next=readContext();if(next!==context){history.clear();context=next;}};
   return {
     history,
-    begin(label){history.begin(readSnapshot(),label);},
+    begin(label){syncContext();history.begin(readSnapshot(),label);},
     commit(){const changed=history.commit(readSnapshot());if(changed)onChange?.('commit');return changed;},
-    record(label,mutate){const before=readSnapshot();mutate();const changed=history.record(before,readSnapshot(),label);if(changed)onChange?.('commit');return changed;},
-    undo(){return history.undo();},
-    redo(){return history.redo();}
+    record(label,mutate){syncContext();const before=readSnapshot();mutate();const changed=history.record(before,readSnapshot(),label);if(changed)onChange?.('commit');return changed;},
+    undo(){syncContext();return history.undo();},
+    redo(){syncContext();return history.redo();}
   };
 }

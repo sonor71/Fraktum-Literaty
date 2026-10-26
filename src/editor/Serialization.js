@@ -1,4 +1,4 @@
-const DATA_URL=/^data:/i;
+const DATA_URL=/^(?:data:|blob:)|\bsrc\s*=\s*["']\s*(?:data:|blob:)/i;
 
 export function assertPersistableDocument(value){
   const visit=(item,path='document')=>{

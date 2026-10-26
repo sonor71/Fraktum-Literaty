@@ -9,3 +9,5 @@ The canonical in-repository history currently starts at the additive v0.19 bound
 - 202610110001 taxonomy v2
 - 202610110002 RPC security hardening
 - 202610110003 taxonomy v2 production reconciliation (idempotent repair for projects where the v2 relations are absent)
+- 202610260001 profile UPDATE grant, privileged-field guard, coherent media lifecycle policies and atomic profile save
+- 202610260002 persisted-admin verification RPC gate and scoped definer EXECUTE/search-path reconciliation

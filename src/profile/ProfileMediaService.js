@@ -1,7 +1,7 @@
 const TYPES=new Set(['image/jpeg','image/png','image/webp']);
 export function validateProfileImage(file,maxBytes=8_000_000){
   if(!file||!TYPES.has(file.type))throw new TypeError('Выберите JPEG, PNG или WebP');
-  if(file.size<=0||file.size>maxBytes)throw new TypeError('Изображение должно быть меньше 8 МБ');
+  if(file.size<=0||file.size>maxBytes)throw new TypeError(`Изображение должно быть не больше ${Math.round(maxBytes/1_000_000)} МБ`);
   return file;
 }
 export async function cropProfileImage(file,{aspect=1,width=512,height=Math.round(512/aspect)}={}){

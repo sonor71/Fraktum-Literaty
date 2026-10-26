@@ -1,40 +1,40 @@
-# D20 Platform — architecture v0.5
+# FRAKTUM Literature — current architecture
 
-Prototype-first architecture. Data is localStorage only.
+The application is a browser ES-module client served by `server.mjs` in
+development and copied to `dist/` by `build.mjs` for Vercel. Runtime configuration
+is generated before app startup from the deployment environment. Supabase Auth,
+Postgres REST/RPC and Storage provide the production backend; localStorage holds
+the current browser session and a cache of draft/UI state, not a substitute cloud
+backend. Production state starts without seeded demo entities.
 
-## Core roles
-- Reader: read, review, post, communities, friends, private chats, group membership.
-- Author: all reader capabilities + verified author status, publish works, full Book Studio, analytics, project collaboration groups.
+- `src/app.js` owns bootstrap, event dispatch and legacy application orchestration.
+  `src/pages.js` renders the shell and pages; the right chat shell keeps drawer and
+  edge control on one transformed container.
+- `src/navigation/` owns route parsing, post permalinks, native/clipboard sharing
+  and page transition policy. History captures selected entities and scroll.
+- `src/cloud.js` implements authenticated REST/RPC/Storage contracts. Refresh-token
+  rotation is single-flight; errors retain service/status context. Browser bundles
+  may contain publishable Supabase keys, never service-role credentials.
+- `src/profile/` validates editable profile data and prepares cropped media. Profile
+  text/details use one transaction; immutable Storage paths prevent stale CDN
+  images. Replaced/deleted objects are cleaned up after pointer changes succeed.
+- `src/editor/` owns structured image normalization, asset uploads, serialization,
+  legacy recovery, history, image errors and serial cloud-save queuing. Document,
+  draft, fragment and book share the canvas/media model and composition renderer.
+  Images store asset path/URL, page, geometry, layers, flow/wrap and caption/alt.
+  Legacy binary images pause persistence visibly until their original source is
+  recovered to Storage; the original local snapshot is preserved.
+- `src/CallSession.js` owns one peer connection and its stream lifecycle, ordered
+  signaling, early ICE queue, timeouts, controls and optional diagnostics.
+  `webrtc-config.js` builds STUN/TURN settings. Supabase transports signals; media
+  uses native WebRTC. Group calls are explicitly unavailable.
+- `src/security/SanitizeHtml.js` sanitizes rich text on ingress/render. SQL RLS,
+  grants and persisted-admin checks are the authorization boundary.
+- `src/feedback/OperationFeedback.js` provides visible errors and pending/duplicate
+  submission handling without remounting an unsaved form.
 
-## Social / communication
-- Persistent right chat rail is available from every authenticated page.
-- Friends are added by username.
-- Direct-message threads are separate from project/group threads.
-- Authors can create project collaboration groups and invite friends.
-- Group/direct calls have prototype call state + history. Real audio/video transport is intentionally not implemented yet; production should use WebRTC or a dedicated realtime provider.
-
-## Content
-- Works and versions remain separate objects conceptually. Reviews are attached to a concrete work version.
-- Library buckets: reading, later, completed.
-- Reader annotations and full reviews are distinct.
-
-## Storage
-Current prototype: localStorage key `d20-platform-v4`.
-Production split: auth/identity, relational database, object storage, realtime chat/presence, calls, search/recommendations, AI review aggregation.
-
-
-## D20 Studio v0.9
-Works получили поля `creationType`, `editorMode`, `documentPages`, `bookPages`, `mediaLibrary`. Поле `content` по-прежнему формируется как plain text для чтения и совместимости.
-
-
-## v0.10
-- D20 Studio expanded to use nearly all available desktop width.
-- Illustrations can be dragged vertically through the text and between left/right/center positions.
-- Text reflows around left/right floated illustrations.
-- Selected illustrations can be resized to 25/40/55/70/100%.
-- Image selection/drag handling was rebuilt to avoid the interaction lock after clicking an image.
-
-
-## Server-first social layer (v0.13)
-
-Основная соцчасть больше не имеет локального fallback: доступ требует Supabase Auth. Посты, комментарии, реакции и сообщения хранятся в Postgres. Личный чат создаётся RPC-функцией `lit_get_or_create_direct_conversation`, что не позволяет клиенту подменить владельца беседы. WebRTC-медиа передаётся peer-to-peer, а Supabase хранит только метаданные звонка и SDP/ICE-сигналинг.
+Remaining boundaries are explicit: private notes are device-local; community
+mutations and author replies await cloud contracts; pre-v0.19 production schema
+history is missing. Current work images use public buckets, so private draft
+media must not be treated as access-controlled. See `docs/FUNCTIONALITY_AUDIT.md`
+and `docs/STABILIZATION_REPORT.md` for verification scope and acceptance gaps.

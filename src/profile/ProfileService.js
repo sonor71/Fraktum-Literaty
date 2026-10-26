@@ -8,7 +8,7 @@ export function normalizeUrl(value){
 }
 
 export function normalizePreferences({wantedGenres=[],unwantedGenres=[],wantedTopics=[],unwantedTopics=[]}){
-  const unique=items=>[...new Set(items.map(Number).filter(Number.isFinite))];
+  const unique=items=>[...new Set(items.map(Number).filter(id=>Number.isSafeInteger(id)&&id>0))];
   const wg=unique(wantedGenres),wt=unique(wantedTopics);
   return {wantedGenres:wg,unwantedGenres:unique(unwantedGenres).filter(id=>!wg.includes(id)),wantedTopics:wt,unwantedTopics:unique(unwantedTopics).filter(id=>!wt.includes(id))};
 }
@@ -25,4 +25,17 @@ export function parseRows(form,prefix,fields){
     if(row[fields[0]])rows.push(row);
   }
   return rows;
+}
+
+// A server null means deletion; fallback is only for fields absent from a partial response.
+export function profileMediaState(profile,fallback={},resolveUrl){
+  const result={};
+  for(const kind of ['avatar','banner']){
+    const column=`${kind}_path`,key=`${kind}Path`,urlKey=`${kind}Url`;
+    const present=profile!=null&&Object.hasOwn(profile,column);
+    const path=present?(profile[column]||''):(fallback[key]||'');
+    result[key]=path;
+    result[urlKey]=path?resolveUrl(kind==='banner'?'lit-profile-banners':'lit-avatars',path):(present?'':fallback[urlKey]||'');
+  }
+  return result;
 }

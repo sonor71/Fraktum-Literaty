@@ -1,14 +1,19 @@
 import {config} from './config.js';
+import {serializeWorkContent} from './editor/MediaModel.js';
+import {assertPersistableDocument} from './editor/Serialization.js';
+import {validateProfileImage} from './profile/ProfileMediaService.js';
 const SUPABASE_URL=config.supabaseUrl;
 const SUPABASE_KEY=config.supabasePublishableKey;
 const SESSION_KEY='d20-supabase-session-v1';
 
 let session=loadSession();
+let sessionRefresh=null;
+let sessionRevision=0;
 
 function loadSession(){
   try{return JSON.parse(localStorage.getItem(SESSION_KEY)||'null');}catch{return null;}
 }
-function saveSession(next){session=next||null;if(session)localStorage.setItem(SESSION_KEY,JSON.stringify(session));else localStorage.removeItem(SESSION_KEY);return session;}
+function saveSession(next){sessionRevision++;session=next||null;if(session)localStorage.setItem(SESSION_KEY,JSON.stringify(session));else localStorage.removeItem(SESSION_KEY);return session;}
 function authHeaders(json=true){
   const h={apikey:SUPABASE_KEY};
   if(session?.access_token)h.Authorization=`Bearer ${session.access_token}`;
@@ -20,19 +25,30 @@ async function parse(res,service='Supabase API'){
   try{data=text?JSON.parse(text):null;}catch{data=text;}
   if(!res.ok){
     const details=[data?.msg,data?.message,data?.error_description,data?.error,typeof data==='string'?data:null].find(value=>typeof value==='string'&&value.trim());
-    throw new Error(`${service} ${res.status}${details?`: ${details.trim()}`:''}`);
+    const error=new Error(`${service} ${res.status}${details?`: ${details.trim()}`:''}`);
+    error.status=res.status;
+    throw error;
   }
   return data;
 }
 async function refreshSession(){
   if(!session?.refresh_token)return null;
+  const revision=sessionRevision;
   const res=await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`,{method:'POST',headers:{apikey:SUPABASE_KEY,'Content-Type':'application/json'},body:JSON.stringify({refresh_token:session.refresh_token})});
-  const data=await parse(res,'Supabase Auth');return saveSession({...data,expires_at:Math.floor(Date.now()/1000)+(data.expires_in||3600)});
+  const data=await parse(res,'Supabase Auth');
+  if(revision!==sessionRevision)return session;
+  return saveSession({...data,expires_at:Math.floor(Date.now()/1000)+(data.expires_in||3600)});
 }
 export async function ensureSession(){
   if(!session)return null;
   if(session.expires_at && session.expires_at < Math.floor(Date.now()/1000)+60){
-    try{await refreshSession();}catch{saveSession(null);}
+    // Token rotation must be single-flight: parallel profile/catalogue requests
+    // otherwise invalidate one another's refresh token.
+    if(!sessionRefresh)sessionRefresh=refreshSession().finally(()=>{sessionRefresh=null;});
+    try{await sessionRefresh;}catch(error){
+      if(error.status===400||error.status===401)saveSession(null);
+      throw error;
+    }
   }
   return session;
 }
@@ -95,7 +111,13 @@ export async function openFraktumGame(){
 }
 
 export async function signOut(){
-  if(session?.access_token){await fetch(`${SUPABASE_URL}/auth/v1/logout`,{method:'POST',headers:authHeaders(false)}).catch(()=>{});}saveSession(null);
+  try{
+    if(session?.access_token){
+      const response=await fetch(`${SUPABASE_URL}/auth/v1/logout`,{method:'POST',headers:authHeaders(false)});
+      await parse(response,'Supabase Auth');
+    }
+  }catch(error){throw new Error(`Вы вышли на этом устройстве, но сервер не подтвердил отзыв сессии: ${error.message}`);}
+  finally{saveSession(null);}
 }
 
 export async function requestOtp({method,identifier,createUser=false,metadata={}}){
@@ -157,7 +179,16 @@ export async function createMyProfile({username,nickname='',firstName='',lastNam
 }
 export async function updateMyProfile(patch){
   await ensureSession(); if(!session?.user?.id)throw new Error('Нет облачной сессии');
-  const rows=await rest(`lit_profiles?id=eq.${session.user.id}`,{method:'PATCH',body:patch,headers:{Prefer:'return=representation'}});return rows?.[0]||null;
+  const editable=new Set(['username','nickname','first_name','last_name','bio','current_status','interests','favorite_topics','wanted_genres','unwanted_genres','avatar_path','banner_path']);
+  if(Object.keys(patch).some(key=>!editable.has(key)))throw new Error('Недопустимое поле профиля');
+  const rows=await rest(`lit_profiles?id=eq.${session.user.id}`,{method:'PATCH',body:patch,headers:{Prefer:'return=representation'}});
+  if(!rows?.[0])throw new Error('Профиль не обновлён: проверьте права доступа');
+  return rows[0];
+}
+
+export async function saveMyProfile({profile,favoriteBooks=[],socialLinks=[],preferences}){
+  await ensureSession();if(!session?.user?.id)throw new Error('Нет облачной сессии');
+  return rpc('lit_save_my_profile',{p_profile:profile,p_details:{favoriteBooks,socialLinks,preferences}});
 }
 
 export async function fetchDiscoveryCatalogs(){
@@ -189,9 +220,41 @@ export async function replaceMyProfileDetails({favoriteBooks=[],socialLinks=[],p
 
 export async function uploadProfileMedia(kind,file){
   await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Войдите в аккаунт');
-  const bucket=kind==='banner'?'lit-profile-banners':'lit-avatars',path=`${me}/${kind}.webp`;
-  const res=await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${path}`,{method:'POST',headers:{apikey:SUPABASE_KEY,Authorization:`Bearer ${session.access_token}`,'Content-Type':file.type,'x-upsert':'true'},body:file});await parse(res);
-  const column=kind==='banner'?'banner_path':'avatar_path';await updateMyProfile({[column]:path});return {path,url:publicObjectUrl(bucket,path)};
+  const {bucket,column}=profileMediaTarget(kind);validateProfileImage(file,kind==='avatar'?5_242_880:8_388_608);
+  const previous=await getMyProfile();if(!previous)throw new Error('Профиль не найден');
+  const extension={'image/jpeg':'jpg','image/png':'png','image/webp':'webp'}[file.type];
+  const path=`${me}/${kind}/${crypto.randomUUID()}.${extension}`;
+  const url=await uploadPublicMedia(bucket,path,file);
+  try{await updateMyProfile({[column]:path});}
+  catch(error){
+    try{await removePublicMedia(bucket,path);}catch(cleanupError){throw new Error(`${error.message}. Не удалось убрать незакреплённый файл: ${cleanupError.message}`,{cause:error});}
+    throw error;
+  }
+  let cleanupWarning='';
+  if(previous[column]&&String(previous[column]).startsWith(`${me}/`)){
+    try{await removePublicMedia(bucket,previous[column]);}catch(error){cleanupWarning=`Изображение сохранено, но прежний файл не удалён: ${error.message}`;}
+  }
+  return {path,url,cleanupWarning};
+}
+
+function profileMediaTarget(kind){
+  if(!['avatar','banner'].includes(kind))throw new TypeError('Неизвестный тип изображения профиля');
+  return {bucket:kind==='banner'?'lit-profile-banners':'lit-avatars',column:kind==='banner'?'banner_path':'avatar_path'};
+}
+async function removePublicMedia(bucket,path){
+  const response=await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}`,{method:'DELETE',headers:authHeaders(),body:JSON.stringify({prefixes:[path]})});
+  await parse(response,'Supabase Storage');
+}
+export async function removeProfileMedia(kind){
+  await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Войдите в аккаунт');
+  const {bucket,column}=profileMediaTarget(kind),previous=await getMyProfile();if(!previous)throw new Error('Профиль не найден');
+  // Detach first: a storage error must never leave a profile pointing at a missing image.
+  await updateMyProfile({[column]:null});
+  let cleanupWarning='';
+  if(previous[column]&&String(previous[column]).startsWith(`${me}/`)){
+    try{await removePublicMedia(bucket,previous[column]);}catch(error){cleanupWarning=`Изображение удалено из профиля, но файл не удалён из Storage: ${error.message}`;}
+  }
+  return {path:'',url:'',cleanupWarning};
 }
 
 const inFilter=ids=>ids.map(x=>`\"${String(x).replaceAll('"','')}\"`).join(',');
@@ -211,6 +274,18 @@ export async function uploadWorkAsset(path,file){
 
 export async function fetchPublicFeed(){
   const posts=await rest('lit_posts?visibility=eq.public&select=id,author_id,post_type,body,work_id,version_id,created_at&order=created_at.desc&limit=50');
+  return hydrateCloudPosts(posts);
+}
+
+// A permalink must resolve independently of the newest fifty feed entries.
+export async function fetchCloudPost(postId){
+  if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(postId||''))throw new Error('Некорректная ссылка на пост');
+  const posts=await rest(`lit_posts?id=eq.${postId}&visibility=eq.public&select=id,author_id,post_type,body,work_id,version_id,created_at&limit=1`);
+  const hydrated=await hydrateCloudPosts(posts);
+  return hydrated[0]||null;
+}
+
+async function hydrateCloudPosts(posts){
   if(!posts?.length)return [];
   const postIds=posts.map(p=>p.id);const authorIds=[...new Set(posts.map(p=>p.author_id))];
   const [profiles,media,likes,comments]=await Promise.all([
@@ -333,8 +408,10 @@ const kindFromDb=(kind)=>({novel:'Роман',novella:'Повесть',story:'Р
 
 export async function fetchCloudLiterature(){
   await ensureSession();const me=session?.user?.id;if(!me)return {works:[],reviews:[]};
+  const fragments=await rest(`lit_fragments?author_id=eq.${me}&select=id,author_id,title,content,plain_text,visibility,evaluation_open,created_at,updated_at,published_at&order=updated_at.desc&limit=200`);
+  const ownFragments=(fragments||[]).map(fragment=>({id:`fragment:${fragment.id}`,cloud:true,fragmentCloudId:fragment.id,authorId:fragment.author_id,author:'Автор',title:fragment.title,kind:'Фрагмент',genres:[],summary:'',cover:'',version:'1',rating:0,ratingsCount:0,content:fragment.plain_text||'',creationType:'fragment',editorMode:fragment.content?.editorMode||'document',documentPages:fragment.content?.documentPages||[{id:`page-${fragment.id}`,html:''}],bookPages:fragment.content?.bookPages||[],mediaLibrary:fragment.content?.mediaLibrary||[],publicationStatus:fragment.visibility==='public'?'published':'draft',evaluationStatus:fragment.evaluation_open?'open':'closed',status:fragment.evaluation_open?'evaluation':'draft',evaluationText:fragment.plain_text||'',feedbackWanted:[],minutes:Math.max(1,Math.ceil((fragment.plain_text||'').length/900)),createdAt:fragment.created_at}));
   const works=await rest('lit_works?select=id,author_id,title,summary,kind,status,genres,topics,content_rating,cover_path,format_id,created_at,updated_at,published_at,writing_status&order=updated_at.desc&limit=200');
-  if(!works?.length)return {works:[],reviews:[]};
+  if(!works?.length)return {works:ownFragments,reviews:[]};
   const workIds=works.map(w=>w.id);
   const [versions,profiles,reviews,workGenres,workAudiences,workTags]=await Promise.all([
     rest(`lit_work_versions?work_id=in.(${inFilter(workIds)})&select=id,work_id,version_no,title,content,plain_text,evaluation_open,evaluation_excerpt,evaluation_meta,published_at,created_at&order=version_no.desc`),
@@ -350,7 +427,7 @@ export async function fetchCloudLiterature(){
   const pm=Object.fromEntries((profiles||[]).map(p=>[p.id,p]));
   const rpm=Object.fromEntries((reviewers||[]).map(p=>[p.id,p]));
   const versionById=Object.fromEntries((versions||[]).map(v=>[v.id,v]));
-  const uiWorks=[];
+  const uiWorks=[...ownFragments];
   const uiIdByCloud={};
   for(const w of works){
     const vs=(versions||[]).filter(v=>v.work_id===w.id).sort((a,b)=>b.version_no-a.version_no);
@@ -380,6 +457,7 @@ export async function fetchCloudLiterature(){
 
 export async function saveCloudWork(local,{mode='draft'}={}){
   await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Сначала войдите');
+  const content=assertPersistableDocument(serializeWorkContent(local));
   let workId=local.cloudId||null;
   const published=mode==='published'||local.publicationStatus==='published';
   const workPayload={title:local.title||'Без названия',summary:local.summary||'',kind:kindToDb(local.kind),status:published?'published':'draft',genres:local.genres||[],topics:local.topics||[],content_rating:local.contentRating||'general'};
@@ -390,7 +468,6 @@ export async function saveCloudWork(local,{mode='draft'}={}){
     const rows=await rest('lit_works',{method:'POST',body:{author_id:me,...workPayload,...(published?{published_at:new Date().toISOString()}:{})},headers:{Prefer:'return=representation'}});work=rows?.[0];workId=work?.id;
   }
   if(!workId)throw new Error('Не удалось сохранить произведение');
-  const content={creationType:local.creationType||'work',editorMode:local.editorMode||'document',documentPages:local.documentPages||[],bookPages:local.bookPages||[],mediaLibrary:local.mediaLibrary||[],localVersion:local.version||'1'};
   const versionPayload={title:local.title||'Без названия',content,plain_text:local.content||'',evaluation_open:mode==='evaluation'||local.evaluationStatus==='open',evaluation_excerpt:local.evaluationText||'',evaluation_meta:{targetType:local.targetType||'Фрагмент',evaluationTarget:local.evaluationTarget||'Фрагмент',feedbackWanted:local.feedbackWanted||[]},...(published?{published_at:local.publishedAt||new Date().toISOString()}:{})};
   let version;
   if(local.cloudVersionId){
@@ -448,7 +525,8 @@ export async function fetchEvaluationCatalog({limit=24,offset=0}={}){
 }
 export async function saveCloudFragment(local,{publish=true}={}){
   await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Войдите в аккаунт');
-  const payload={author_id:me,work_id:local.cloudId||null,version_id:local.cloudVersionId||null,title:local.title||'Без названия',content:{type:'doc',content:[{type:'paragraph',text:local.content||''}]},plain_text:local.content||'',visibility:publish?'public':'private',evaluation_open:publish,updated_at:new Date().toISOString(),...(publish?{published_at:local.publishedAt||new Date().toISOString()}:{})};
+  const content=assertPersistableDocument({type:'doc',content:[{type:'paragraph',text:local.content||''}],...serializeWorkContent(local)});
+  const payload={author_id:me,work_id:local.cloudId||null,version_id:local.cloudVersionId||null,title:local.title||'Без названия',content,plain_text:local.content||'',visibility:publish?'public':'private',evaluation_open:publish,updated_at:new Date().toISOString(),...(publish?{published_at:local.publishedAt||new Date().toISOString()}:{})};
   if(local.fragmentCloudId){const rows=await rest(`lit_fragments?id=eq.${local.fragmentCloudId}&author_id=eq.${me}`,{method:'PATCH',body:payload,headers:{Prefer:'return=representation'}});return rows?.[0];}
   const rows=await rest('lit_fragments',{method:'POST',body:payload,headers:{Prefer:'return=representation'}});return rows?.[0];
 }

@@ -18,3 +18,12 @@ test('major navigation and editor actions are registered without missing functio
  for(const action of ['canvas-add-text','insert-canvas-media','canvas-delete','preview-work','open-community'])assert.match(app,new RegExp(`action==='${action}'`));
  assert.doesNotMatch(pages,/onclick\s*=/);
 });
+test('development server keeps checkout internals private and returns useful static URL errors',async()=>{
+ for(const path of ['/.git/config','/.env','/package.json','/src/..%2f..%2f.git/config','/src/missing-module.js','/assets/missing-image.png']){
+   const response=await fetch(`http://127.0.0.1:5199${path}`);
+   assert.equal(response.status,404,`${path} must not serve checkout internals or the SPA fallback`);
+ }
+ assert.equal((await fetch('http://127.0.0.1:5199/%E0%A4%A')).status,400);
+ assert.equal((await fetch('http://127.0.0.1:5199/')).status,200,'invalid URL must not crash the server');
+ assert.match((await fetch('http://127.0.0.1:5199/runtime-config.js')).headers.get('cache-control'),/no-store/);
+});

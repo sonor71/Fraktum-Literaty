@@ -1,84 +1,72 @@
-# v0.5 quick test
+# Development and regression checks
 
-1. Register as Reader.
-2. Open the right chat rail.
-3. Click a friend avatar; send a direct message.
-4. In the drawer add a friend by demo username: `@james`, `@jasper`, or `@rowan`.
-5. Open Groups and enter the seeded project group.
-6. Start Audio or Video call; open Calls and end it; check call history.
-7. Upgrade to Author (demo verification).
-8. Open chat drawer → Groups → create a project group and select friends.
-9. Send group messages and start/end a call.
-10. Verify existing flows still work: Read → annotations → review → Profile; Create → publish; Library; Communities.
+Use the existing checkout; cloud tasks are isolated and do not need another
+worktree. Install the locked development dependencies from the repository root:
 
-Calls are UI/state prototypes only: there is no real microphone/camera network connection yet.
+```bash
+npm ci --include=dev --cache /tmp/fraktum-npm-cache --no-fund --no-audit
+npm run lint
+npm run typecheck
+npm test
+npm run test:integration
+npm run build
+npm run test:e2e
+```
 
-## v0.6 — новые сценарии
+`npm run test:all` runs these checks in that order. The browser application and
+production build require genuine `VITE_SUPABASE_URL` and
+`VITE_SUPABASE_PUBLISHABLE_KEY` values, supplied through environment settings or an
+ignored `.env.local`. Missing configuration intentionally fails before replacing
+the existing build artifact. Never put a service-role key in browser configuration.
 
-### Анимация чатов
-1. На любой странице нажать стрелку на правом рейле.
-2. Панель должна плавно выехать справа, а не появиться мгновенно.
-3. Закрыть через `×` или стрелку — панель должна плавно уйти вправо.
-4. Нажать на аватар друга в закрытом состоянии — панель должна выехать и сразу открыть личный чат.
+Start development with `PORT=5173 npm run dev`. Verify the app shell,
+`/runtime-config.js`, JavaScript modules and manifest with local HTTP requests,
+then use the configured project's real Auth/profile flows. Processes must restart
+in a new cloud task; see the saved environment startup instructions.
 
-### Комментарии к постам
-1. На Главной нажать кнопку `💬` под любым постом.
-2. Должны отображаться комментарии других пользователей.
-3. Для комментария проверить `👍 Полезно`, `≠ Не согласен`, `👎 Бесполезно`.
-4. Добавить собственный комментарий и проверить обновление счётчика поста.
+## What the automated checks establish
 
-### Раздел «Оценить»
-1. В левом меню открыть `Оценить`.
-2. Нажать `ФИЛЬТР`, выбрать жанры/типы/размер отрывка и сохранить.
-3. Нажать `НАЧАТЬ ОЦЕНИВАТЬ`.
-4. Должен открыться короткий отрывок, а не полный текст произведения.
-5. Выделить фразу, добавить пометку, затем завершить полноценной рецензией.
-6. После отправки вернуться в раздел `Оценить`; произведение не должно автоматически становиться «Прочитанным».
+- ESLint checks JavaScript undefined names and the configured correctness rules.
+  TypeScript currently checks the editor's TypeScript model, not every JavaScript
+  module in the application.
+- Node unit tests cover media/history/save queuing, routing/sharing, sanitization,
+  call lifecycle/diagnostics/config, profile validation and unavailable controls.
+- Integration tests exercise explicit HTTP request/response contracts and actual
+  PostgreSQL SQL/RLS behavior in PGlite against an isolated prerequisite schema.
+  The prerequisite schema is a fixture, not an invented production migration.
+- Browser tests use `playwright-core` and `/usr/bin/chromium`. Set `CHROMIUM_PATH`
+  only to another permitted installed Chromium when necessary. Missing browser
+  support is an error, not a silently passing smoke check.
+- Browser API fixtures are isolated from production and fail on unknown endpoints.
+  They test the real rendered UI: OTP, sessions, errors/loading, share/permalinks,
+  history, drawer geometry, profiles/media, feed/reactions, DM/groups and editor
+  interactions/reload/recovery. Viewports include 360, 390, 430, 1366 and 1920px.
+- The RTP test uses the production CallSession controller in separate browser
+  contexts, covering audio/video, both directions and repeated calls. Under the
+  cloud-managed `disable_non_proxied_udp` policy without TURN it explicitly skips
+  and reports why. Never bypass managed policies or count this as a passed call.
 
-### Читать vs Оценить
-- `Читать` — полное произведение и полноценное чтение.
-- `Оценить` — короткий отрывок до нескольких минут для критики и XP.
+Synthetic API sessions, generated media and fixture coordinates are test inputs.
+They do not replace production implementations or demonstrate actual OTP delivery,
+production Storage/RLS, real account-to-account calls or NAT/TURN interoperability.
+Expected HTTP failures are asserted separately; unexpected page errors and console
+errors fail the relevant browser scenarios.
 
-## v0.9 — D20 Studio
-1. Войти как автор и открыть «Создать».
-2. Нажать «+ Новый».
-3. Проверить два пути: «Отрывок для оценки» и «Произведение».
-4. Для произведения проверить режимы «Документ» и «Книга».
-5. В документе: набрать текст, добавить лист, применить жирный/курсив/заголовок/список/выравнивание.
-6. В правой медиапанели вставить иллюстрацию и переключить обтекание слева/справа/по ширине.
-7. Загрузить своё изображение до 1.5 МБ и вставить его.
-8. В режиме книги пройти обложку → титульный лист → текстовую страницу стрелками, добавить новую страницу.
-9. На обложке выбрать изображение из медиатеки — оно должно стать фоном.
-10. Сохранить проект, перезагрузить страницу и проверить сохранение текста/страниц.
-11. Отправить отрывок на оценку и проверить его появление в разделе «Оценить».
-12. Опубликовать произведение и проверить его в разделе «Читать».
+## Required live acceptance
 
+With an authorized test Supabase project and two accounts, check registration/OTP,
+login/logout/session refresh; avatar/banner upload/replace/remove; profile taxonomy;
+post upload/like/comment/share and a permalink opened on another device; DM/group
+messages; document/draft/fragment/book save, publish and fresh-device media restore.
+Verify image drag/resize/flow/free/delete/history and multiple images on mobile and
+desktop. Confirm ordinary users cannot self-verify or mutate another user's rows.
 
-## v0.10
-- D20 Studio expanded to use nearly all available desktop width.
-- Illustrations can be dragged vertically through the text and between left/right/center positions.
-- Text reflows around left/right floated illustrations.
-- Selected illustrations can be resized to 25/40/55/70/100%.
-- Image selection/drag handling was rebuilt to avoid the interaction lock after clicking an image.
+Run Security Advisor and `supabase/security_audit.sql`, reconcile the missing
+historical baseline, and compare production migration history before applying
+additive changes. Use two allowed browsers and real accounts to establish audible
+and visible media in both directions, mute/camera switching, reject, hangup,
+repeated calls and relay behavior. Optional TURN variables and the checklist are
+in `REALTIME_AND_CALLS.md`.
 
-## v0.17 — Free Canvas Book Studio
-
-1. Создать новое произведение → `Книга`.
-2. На обложке загрузить собственное фото: оно должно сразу появиться как свободный объект.
-3. Перетащить фото в любую точку, изменить размер за угол и повернуть фиолетовой ручкой.
-4. Сделать другое фото фоном страницы, затем поместить ещё 2 изображения поверх него.
-5. Проверить `На передний план / Выше / Ниже / На задний план`.
-6. Добавить обычный текст двойным кликом по пустой части страницы.
-7. Добавить `Заметку`; изменить фон блока и сделать его снова прозрачным.
-8. Изменить цвет страницы и базовый цвет текста.
-9. Перетащить `.jpg/.png` из проводника прямо на страницу.
-10. Скопировать изображение в буфер и вставить его на страницу.
-11. Поставить фото поверх большого текстового блока, включить `Обтекать автоматически` и проверить, что текст уходит от зоны фотографии.
-12. Изменить отступ обтекания.
-13. Зафиксировать объект, убедиться, что его нельзя случайно перетащить/изменить размер, затем разблокировать.
-14. Выделить объект и проверить стрелки, Shift+стрелки, Delete, Ctrl/Cmd+D.
-15. Включить `Макет`: должна появиться сетка; при движении к центру — направляющие.
-16. Переключиться в `📖 Книга` и проверить, что композиция совпадает с редактором.
-17. Опубликовать и открыть Reader: фон, слои, размеры и положение объектов должны сохраниться.
-18. Перезагрузить браузер и убедиться, что canvas сохраняется локально и после cloud-save.
-19. Открыть старый проект v0.16: текст/обложка должны автоматически мигрировать в новый canvas без потери содержимого.
+Passing local fixtures or a copied static build is not the production definition
+of done. See `docs/STABILIZATION_REPORT.md` for the actual run and known limits.
