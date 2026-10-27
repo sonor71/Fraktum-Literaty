@@ -553,12 +553,14 @@ export async function getOrCreateDirectConversation(otherUserId){
   await ensureSession();if(!session?.user?.id)throw new Error('Сначала войдите');
   return rpc('lit_get_or_create_direct_conversation',{p_other:otherUserId});
 }
-export async function createCloudGroupConversation(title,memberIds=[],workId=null){
+export async function createCloudGroupConversation(title,memberIds=[],workId=null,clientId=crypto.randomUUID()){
   await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Сначала войдите');
-  const rows=await rest('lit_conversations',{method:'POST',body:{conversation_type:'project',title,created_by:me,work_id:workId||null},headers:{Prefer:'return=representation'}});
+  let rows;
+  try{rows=await rest('lit_conversations',{method:'POST',body:{id:clientId,conversation_type:'project',title,created_by:me,work_id:workId||null},headers:{Prefer:'return=representation'}});}
+  catch(error){if(error.status!==409)throw error;rows=await rest(`lit_conversations?id=eq.${clientId}&created_by=eq.${me}&select=id&limit=1`);}
   const c=rows?.[0];if(!c)throw new Error('Не удалось создать группу');
   const unique=[...new Set([me,...memberIds.filter(Boolean)])];
-  await rest('lit_conversation_members',{method:'POST',body:unique.map(id=>({conversation_id:c.id,user_id:id,role:id===me?'owner':'member'}))});
+  await rest('lit_conversation_members?on_conflict=conversation_id,user_id',{method:'POST',body:unique.map(id=>({conversation_id:c.id,user_id:id,role:id===me?'owner':'member'})),headers:{Prefer:'resolution=ignore-duplicates'}});
   return c.id;
 }
 export async function fetchMyConversations(){
@@ -585,16 +587,21 @@ export async function fetchMyConversations(){
 }
 export async function fetchConversationMessages(conversationId){
   await ensureSession();const me=session?.user?.id;if(!me)return [];
-  const rows=await rest(`lit_messages?conversation_id=eq.${conversationId}&select=id,sender_id,body,created_at,edited_at&order=created_at.asc&limit=250`);
+  const rows=await rest(`lit_messages?conversation_id=eq.${conversationId}&select=id,sender_id,body,created_at,edited_at&order=created_at.desc&limit=250`);
   if(!rows?.length)return [];
   const ids=[...new Set(rows.map(x=>x.sender_id))];
   const profiles=await rest(`lit_profiles?id=in.(${inFilter(ids)})&select=id,nickname,username`);
   const pm=Object.fromEntries((profiles||[]).map(p=>[p.id,p]));
-  return rows.map(m=>({id:m.id,fromId:m.sender_id,from:pm[m.sender_id]?.nickname||pm[m.sender_id]?.username||'Пользователь',text:m.body,time:new Date(m.created_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}),createdAt:m.created_at,mine:m.sender_id===me}));
+  return rows.slice().sort((a,b)=>a.created_at.localeCompare(b.created_at)).map(m=>({id:m.id,fromId:m.sender_id,from:pm[m.sender_id]?.nickname||pm[m.sender_id]?.username||'Пользователь',text:m.body,time:new Date(m.created_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}),createdAt:m.created_at,mine:m.sender_id===me}));
 }
-export async function sendCloudMessage(conversationId,text){
+export async function sendCloudMessage(conversationId,text,clientId=crypto.randomUUID()){
   await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Сначала войдите');
-  return rest('lit_messages',{method:'POST',body:{conversation_id:conversationId,sender_id:me,body:text},headers:{Prefer:'return=representation'}});
+  try{return await rest('lit_messages',{method:'POST',body:{id:clientId,conversation_id:conversationId,sender_id:me,body:text},headers:{Prefer:'return=representation'}});}
+  catch(error){
+    if(error.status!==409)throw error;
+    const rows=await rest(`lit_messages?id=eq.${clientId}&conversation_id=eq.${conversationId}&sender_id=eq.${me}&select=id,sender_id,body,created_at&limit=1`);
+    if(!rows?.length)throw error;return rows;
+  }
 }
 
 // ---- Real WebRTC call signaling persisted in Supabase ----

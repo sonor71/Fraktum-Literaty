@@ -3,7 +3,7 @@ import {ANNOTATION_TYPES,FEEDBACK_CATEGORIES} from './data.js';
 import * as pages from './pages.js';
 import {esc,modal,toast} from './ui.js';
 import {showFeedback,withOperation} from './feedback/OperationFeedback.js';
-import {ensureSession,getSession,openFraktumGame,signOut,getMyProfile,updateMyProfile,fetchPublicFeed,createCloudPost,toggleCloudPostLike,fetchPostComments,createCloudComment,setCloudCommentReaction,isCloudAuthenticated,requestOtp,verifyOtp,createMyProfile,checkServerConnection,findProfileByUsername,getOrCreateDirectConversation,createCloudGroupConversation,fetchMyConversations,fetchConversationMessages,sendCloudMessage,getConversationPeer,createCloudCall,fetchIncomingCalls,getCloudCall,setCloudCallStatus,sendCloudCallSignal,fetchCloudCallSignals,fetchNotifications,markNotificationRead,markAllNotificationsRead,createReport,fetchModerationReports,setModerationReportStatus,requestAuthorVerification,fetchMyVerificationRequests,fetchVerificationRequests,resolveAuthorVerification,fetchCloudLiterature,saveCloudWork,saveCloudReview,setCloudReviewReaction,saveCloudReadingProgress,uploadWorkAsset,publicObjectUrl,fetchDiscoveryCatalogs,fetchMyProfileDetails,replaceMyProfileDetails,uploadProfileMedia,createEvaluationSession,completeEvaluationItem,fetchEvaluationCatalog,saveCloudFragment,createCloudAnnotation,deleteCloudAnnotation,fetchAuthorFeedback,saveCloudWorkTaxonomy} from './cloud.js';
+import {ensureSession,getSession,openFraktumGame,signOut,getMyProfile,updateMyProfile,fetchPublicFeed,createCloudPost,toggleCloudPostLike,fetchPostComments,createCloudComment,setCloudCommentReaction,isCloudAuthenticated,requestOtp,verifyOtp,createMyProfile,checkServerConnection,findProfileByUsername,getOrCreateDirectConversation,getConversationPeer,createCloudCall,fetchIncomingCalls,getCloudCall,setCloudCallStatus,sendCloudCallSignal,fetchCloudCallSignals,fetchNotifications,markNotificationRead,markAllNotificationsRead,createReport,fetchModerationReports,setModerationReportStatus,requestAuthorVerification,fetchMyVerificationRequests,fetchVerificationRequests,resolveAuthorVerification,fetchCloudLiterature,saveCloudWork,saveCloudReview,setCloudReviewReaction,saveCloudReadingProgress,uploadWorkAsset,publicObjectUrl,fetchDiscoveryCatalogs,fetchMyProfileDetails,replaceMyProfileDetails,uploadProfileMedia,createEvaluationSession,completeEvaluationItem,fetchEvaluationCatalog,saveCloudFragment,createCloudAnnotation,deleteCloudAnnotation,fetchAuthorFeedback,saveCloudWorkTaxonomy} from './cloud.js';
 import {AssetService} from './editor/AssetService.js';
 import {CallSession,CALL_STATUS_LABELS} from './CallSession.js';
 import {createEditorRoot} from './editor/EditorRoot.js';
@@ -22,8 +22,14 @@ import {advanceSession,createLocalSession,validateSessionSize} from './evaluatio
 import {fetchCloudPost} from './cloud.js';
 import {NAVIGATION_PAGES,routeFromLocation,routeUrl,transitionPage} from './navigation/Navigation.js';
 import {sharePost} from './navigation/SharePost.js';
+import {ChatController} from './chat/ChatController.js';
+import {PollingChatTransport} from './chat/ChatTransport.js';
+import {SupabaseChatRepository} from './chat/SupabaseChatRepository.js';
+import {ModalLifecycle} from './motion/ModalLifecycle.js';
 
 const app=document.querySelector('#app');
+const modalLifecycle=new ModalLifecycle({root:app,onClose:()=>update(s=>s.ui.modal=null,{persist:false})});
+const chat=new ChatController({transport:new PollingChatTransport(new SupabaseChatRepository({getUser:()=>state.user,getPeople:()=>state.peopleDirectory})),getState:()=>state,update,report:showFeedback});
 let signupRole=null;
 let loginMode=false;
 let forceAuthScreen=false;
@@ -32,7 +38,6 @@ let otpPending=null;
 let cloudFeedLoaded=false;
 let readerFont=18;
 let readerTheme=0;
-let animateChatOpen=false;
 let savedEditorRange=null;
 let selectedTextAnchor=null;
 let selectedMediaFigure=null;
@@ -44,7 +49,6 @@ const queueStudioSave=createSaveQueue();
 let bookFlipLocked=false;
 let swipeStartX=null;
 let authReady=false;
-let chatsPollTimer=null;
 let incomingCallTimer=null;
 let notificationsTimer=null;
 let activeRtc=null;
@@ -73,33 +77,30 @@ function render(){
   if(!authReady){app.innerHTML='<main class="onboarding"><section class="onboard-card"><h2>Подключение к FRAKTUM…</h2><p class="muted">Проверяем сессию Supabase.</p></section></main>';return;}
   if(!isCloudAuthenticated()||!state.user||forceAuthScreen){ const auth={method:authMethod,pending:otpPending,fromApp:false}; app.innerHTML= loginMode?pages.loginPage(auth):(signupRole?pages.registration(signupRole,auth):pages.onboarding()); attachSpecial(); return; }
   const map={home:pages.home,post:pages.postPage,evaluate:pages.evaluatePage,evaluation:pages.evaluationSession,read:pages.readDiscovery,work:pages.workDetailPage,reader:pages.readerPage,library:pages.library,create:pages.createPage,notes:pages.notesPage,communities:pages.communitiesPage,community:pages.communityDetail,messages:pages.messagesPage,profile:pages.profilePage,analytics:pages.analyticsPage,admin:pages.adminPage,feedback:pages.feedbackPage};
+  const persistentChat=app.querySelector('.chat-shell');
+  const chatScroll=chat.captureScroll();
+  const focus=document.activeElement;
   app.innerHTML=(map[state.ui.page]||pages.home)();
-  if(state.ui.modal) app.insertAdjacentHTML('beforeend',state.ui.modal);
+  if(persistentChat)app.querySelector('.chat-shell')?.replaceWith(persistentChat);
+  chat.restoreScroll(chatScroll);
+  if(!state.ui.modal&&modalLifecycle.node)void modalLifecycle.close();
+  modalLifecycle.restore();
+  if(focus?.isConnected&&persistentChat?.contains(focus))focus.focus({preventScroll:true});
   if(state.ui.toast){ app.insertAdjacentHTML('beforeend',toast(state.ui.toast)); setTimeout(()=>{update(s=>s.ui.toast=null,{persist:false}); const t=document.querySelector('.toast'); if(t)t.remove();},1800); }
   attachSpecial();
-  animateDrawerIfNeeded();
-}
-
-function animateDrawerIfNeeded(){
-  if(!animateChatOpen||!state.ui.chatPanelOpen)return;
-  const shell=document.querySelector('.chat-shell');
-  if(!shell){animateChatOpen=false;return;}
-  shell.classList.remove('is-open');
-  requestAnimationFrame(()=>requestAnimationFrame(()=>shell.classList.add('is-open')));
-  animateChatOpen=false;
+  chat.mount();
 }
 
 function toggleChatPanel(){
-  const opening=!state.ui.chatPanelOpen;
-  update(s=>s.ui.chatPanelOpen=opening,{persist:false});
-  document.querySelector('.chat-shell')?.classList.toggle('is-open',opening);
-  const drawer=document.querySelector('.chat-drawer');
-  if(drawer)drawer.inert=!opening;
-  const toggle=document.querySelector('.chat-edge-toggle');
-  if(toggle){toggle.textContent=opening?'›':'‹';toggle.setAttribute('aria-expanded',String(opening));toggle.setAttribute('aria-label',opening?'Закрыть чаты':'Открыть чаты');if(!opening)toggle.focus({preventScroll:true});}
+  const opening=!state.ui.chatPanelOpen;chat.setOpen(opening);
+  if(!opening)document.querySelector('.chat-edge-toggle')?.focus({preventScroll:true});
 }
 
-function notify(text){ update(s=>s.ui.toast=text,{persist:false}); render(); }
+function notify(text){
+  document.querySelector('.toast')?.remove();
+  app.insertAdjacentHTML('beforeend',toast(text));
+  const node=app.querySelector('.toast');setTimeout(()=>node?.remove(),1800);
+}
 const reportedSyncIssues=new Set();
 function reportSyncIssue(context,error){
   const message=`${context}: ${error instanceof Error?error.message:String(error)}`;
@@ -126,8 +127,11 @@ async function go(page,{route={},historyMode='push',scroll={x:0,y:0},restoration
   if(restorationId==null){restoringNavigationScroll=false;clearTimeout(navigationScrollTimer);}
   const next={...navigationSnapshot(),...route,page};
   if(historyMode!=='none')window.history[historyMode==='replace'?'replaceState':'pushState']({fraktum:{route:next,scroll}},'',routeUrl(next));
+  if(modalLifecycle.node)await closeModal();
+  if(revision!==navigationRevision)return;
   await transitionPage(()=>{
     if(revision!==navigationRevision)return;
+    modalLifecycle.discard();
     update(s=>{Object.assign(s.ui,next);s.ui.modal=null;s.ui.sidebarOpen=false;},{persist:false});
     render();
     window.scrollTo({left:scroll.x||0,top:scroll.y||0,behavior:'instant'});
@@ -175,9 +179,26 @@ window.addEventListener('scroll',()=>{
   },100);
 },{passive:true});
 window.addEventListener('popstate',()=>{restoreLocation().catch(error=>notify(`Не удалось перейти: ${error.message}`));});
-window.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.ui.chatPanelOpen&&!state.ui.modal){toggleChatPanel();}});
-function openModal(html,size){ update(s=>s.ui.modal=modal(html,size),{persist:false}); render(); }
-function closeModal(){ update(s=>s.ui.modal=null,{persist:false}); render(); }
+window.addEventListener('keydown',event=>{if(modalLifecycle.trap(event))return;if(event.key==='Escape'&&state.ui.chatPanelOpen&&!state.ui.modal){toggleChatPanel();}});
+function openModal(html,size){const markup=modal(html,size);update(s=>s.ui.modal=markup,{persist:false});modalLifecycle.open(markup);attachDialogControls(modalLifecycle.node);}
+function closeModal(){return modalLifecycle.close();}
+
+const dialogBindings=new WeakSet();
+function attachDialogControls(root){
+  for(const control of root.querySelectorAll('#profileAvatarUpload,#profileBannerUpload,#profileAvatarRemove,#profileBannerRemove,[data-tag-search],[data-taxonomy-search],.preference-selector input[type="checkbox"]')){
+    if(dialogBindings.has(control))continue;dialogBindings.add(control);
+    if(control.id==='profileAvatarUpload'||control.id==='profileBannerUpload')control.addEventListener('change',event=>handleProfileMedia(event,control.id.includes('Avatar')?'avatar':'banner'));
+    else if(control.id==='profileAvatarRemove'||control.id==='profileBannerRemove')control.addEventListener('click',()=>handleProfileMediaRemoval(control.id.includes('Avatar')?'avatar':'banner'));
+    else if(control.matches('[data-tag-search],[data-taxonomy-search]'))control.addEventListener('input',()=>{
+      const query=control.value.trim().toLowerCase(),tags=control.matches('[data-tag-search]');
+      control.closest(tags?'.preference-selector':'.taxonomy-choices')?.querySelectorAll(tags?'[data-tag-label]':'[data-taxonomy-label]').forEach(label=>{label.hidden=!!query&&!(tags?label.dataset.tagLabel:label.dataset.taxonomyLabel).includes(query);});
+    });
+    else control.addEventListener('change',()=>{
+      if(!control.checked)return;const [domain,side]=control.closest('[data-preference-kind]').dataset.preferenceKind.split('-');
+      const opposite=root.querySelector(`[data-preference-kind="${domain}-${side==='wanted'?'unwanted':'wanted'}"] input[value="${CSS.escape(control.value)}"]`);if(opposite)opposite.checked=false;
+    });
+  }
+}
 
 function attachSpecial(){
   const studioForm=document.querySelector('#workEditor');
@@ -215,15 +236,7 @@ function attachSpecial(){
   });
   const upload=document.querySelector('#mediaUpload'); if(upload) upload.addEventListener('change',handleMediaUpload);
   const legacyUpload=document.querySelector('#legacyMediaUpload');if(legacyUpload)legacyUpload.addEventListener('change',async event=>{const file=event.target.files?.[0];if(file)await restoreLegacyMedia(file);});
-  const avatarUpload=document.querySelector('#profileAvatarUpload');if(avatarUpload)avatarUpload.addEventListener('change',event=>handleProfileMedia(event,'avatar'));
-  const bannerUpload=document.querySelector('#profileBannerUpload');if(bannerUpload)bannerUpload.addEventListener('change',event=>handleProfileMedia(event,'banner'));
-  document.querySelector('#profileAvatarRemove')?.addEventListener('click',()=>handleProfileMediaRemoval('avatar'));
-  document.querySelector('#profileBannerRemove')?.addEventListener('click',()=>handleProfileMediaRemoval('banner'));
-  document.querySelectorAll('[data-tag-search]').forEach(input=>input.addEventListener('input',()=>{const query=input.value.trim().toLowerCase();input.closest('.preference-selector')?.querySelectorAll('[data-tag-label]').forEach(label=>{label.hidden=!!query&&!label.dataset.tagLabel.includes(query);});}));
-  document.querySelectorAll('[data-taxonomy-search]').forEach(input=>input.addEventListener('input',()=>{const query=input.value.trim().toLowerCase();input.closest('.taxonomy-choices')?.querySelectorAll('[data-taxonomy-label]').forEach(label=>{label.hidden=!!query&&!label.dataset.taxonomyLabel.includes(query);});}));
-  document.querySelectorAll('.preference-selector input[type="checkbox"]').forEach(input=>input.addEventListener('change',()=>{
-    if(!input.checked)return;const [domain,side]=input.closest('[data-preference-kind]').dataset.preferenceKind.split('-');const opposite=document.querySelector(`[data-preference-kind="${domain}-${side==='wanted'?'unwanted':'wanted'}"] input[value="${CSS.escape(input.value)}"]`);if(opposite)opposite.checked=false;
-  }));
+  attachDialogControls(document);
   const widthSlider=document.querySelector('#mediaWidthSlider');
   if(widthSlider) widthSlider.addEventListener('input',()=>setMediaSize(widthSlider.value,true));
   const gapSlider=document.querySelector('#mediaGapSlider');
@@ -939,7 +952,7 @@ async function refreshNotifications(renderIfChanged=false){
     const prevUnread=(state.notifications||[]).filter(n=>!n.read_at).length;
     const nextUnread=(rows||[]).filter(n=>!n.read_at).length;
     update(s=>s.notifications=rows||[],{persist:false});
-    if(renderIfChanged&&prevUnread!==nextUnread&&!document.activeElement?.matches('input,textarea,[contenteditable="true"]'))render();
+    if(renderIfChanged&&prevUnread!==nextUnread){const bell=document.querySelector('.notification-bell');if(bell){bell.classList.toggle('has-unread',nextUnread>0);bell.innerHTML=`🔔${nextUnread?`<i>${nextUnread>99?'99+':nextUnread}</i>`:''}`;}}
   }catch(err){reportSyncIssue('notifications',err);}
 }
 async function refreshAdminData(renderAfter=false){
@@ -969,32 +982,13 @@ function previewCurrentWork(){
   const w=state.works.find(z=>z.id===x.id);if(!w)return;
   openModal(`<div class="publish-preview"><span class="eyebrow">Предпросмотр карточки</span><div class="preview-work-card"><img src="${esc(w.cover||'/assets/home/reading-cover.png')}" alt=""><div><h2>${esc(x.title||'Без названия')}</h2><p class="muted">${esc(state.user.name)} · ${esc(x.kind)}</p><div>${x.genres.map(g=>`<span class="pill">${esc(g)}</span>`).join('')}</div><p>${esc(x.summary||'Описание ещё не добавлено.')}</p><small>${x.content.trim()?x.content.trim().split(/\s+/).length:0} слов · ~${Math.max(1,Math.ceil(x.content.length/900))} мин</small></div></div><div class="modal-actions"><button data-action="close-modal">Закрыть</button></div></div>`,'wide');
 }
-let lastChatSignature='';
-async function refreshCloudChats(renderIfChanged=true){
-  if(!isCloudAuthenticated())return;
-  try{
-    const data=await fetchMyConversations();
-    let selectedId=state.ui.selectedChatId;
-    if(!data.threads.some(t=>t.id===selectedId))selectedId=data.threads[0]?.id||null;
-    if(selectedId){
-      const selected=data.threads.find(t=>t.id===selectedId);
-      if(selected)selected.messages=await fetchConversationMessages(selectedId);
-    }
-    const sig=JSON.stringify(data.threads.map(t=>[t.id,t.title,(t.messages||[]).map(m=>m.id)]));
-    const changed=sig!==lastChatSignature;
-    update(s=>{s.chatThreads=data.threads;s.peopleDirectory=data.people;s.friends=data.threads.filter(t=>t.type==='dm').flatMap(t=>t.memberIds).filter((x,i,a)=>a.indexOf(x)===i);s.ui.selectedChatId=selectedId;},{persist:false});
-    const typing=document.activeElement?.closest?.('.thread-message-form');
-    if(changed&&renderIfChanged&&!typing){lastChatSignature=sig;render();}
-    else if(!changed||!renderIfChanged)lastChatSignature=sig;
-  }catch(err){reportSyncIssue('chat sync',err);}
-}
+async function refreshCloudChats(){if(isCloudAuthenticated())await chat.refresh();}
 function startCloudPolling(){
-  clearInterval(chatsPollTimer);clearInterval(incomingCallTimer);clearInterval(notificationsTimer);
-  chatsPollTimer=setInterval(()=>refreshCloudChats(true),1800);
+  clearInterval(incomingCallTimer);clearInterval(notificationsTimer);chat.subscribe();
   incomingCallTimer=setInterval(pollIncomingCalls,1500);
   notificationsTimer=setInterval(()=>refreshNotifications(true),7000);
 }
-function stopCloudPolling(){clearInterval(chatsPollTimer);clearInterval(incomingCallTimer);clearInterval(notificationsTimer);chatsPollTimer=null;incomingCallTimer=null;notificationsTimer=null;}
+function stopCloudPolling(){chat.clear();clearInterval(incomingCallTimer);clearInterval(notificationsTimer);incomingCallTimer=null;notificationsTimer=null;}
 
 async function pollIncomingCalls(){
   if(!isCloudAuthenticated()||activeRtc||callStarting||incomingCallPolling)return;
@@ -1057,7 +1051,7 @@ async function setupRtc({callId,conversationId,peerId,title,mode,initiator}){
     onEnded:()=>{
       if(activeRtc!==session)return;activeRtc=null;
       update(s=>{s.callHistory.push({id:callId,title,mode:mode==='video'?'Видео':'Аудио',endedAt:new Date().toLocaleString('ru-RU',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'2-digit'})});s.activeCall=null;s.ui.chatTab='calls';},{persist:false});
-      const close=document.querySelector('#realCallHangup');if(close)close.textContent='Закрыть';updateCallControls();render();
+      const close=document.querySelector('#realCallHangup');if(close)close.textContent='Закрыть';updateCallControls();chat.mount();
     }
   });
   activeRtc=session;
@@ -1065,6 +1059,7 @@ async function setupRtc({callId,conversationId,peerId,title,mode,initiator}){
   document.querySelector('#realCallOverlay').dataset.callId=callId;
   window.FraktumRTC={diagnostics:()=>({...session.diagnostics})};
   update(s=>{s.activeCall={threadId:conversationId,callId,title,mode,startedAt:new Date().toISOString(),real:true};s.ui.chatTab='calls';s.ui.chatPanelOpen=true;},{persist:false});
+  chat.mount();
   await session.start();
 }
 async function acceptCloudCall(callId){
@@ -1128,7 +1123,7 @@ app.addEventListener('click',withOperation(async e=>{
   if(action==='cloud-logout'){stopCloudPolling();if(activeRtc)await finishLocalCall(false);try{await signOut();}finally{update(s=>{s.user=null;s.posts=[];s.chatThreads=[];s.peopleDirectory=[];s.friends=[];s.cloud={...(s.cloud||{}),connected:false};},{persist:false});loginMode=true;forceAuthScreen=false;render();}return;}
   if(action==='back-onboarding'){signupRole=null;otpPending=null;render();return;}
   if(action==='navigate'){if(el.dataset.page==='admin')await refreshAdminData(false);if(el.dataset.page==='feedback')await refreshAuthorFeedback();return go(el.dataset.page);}
-  if(action==='toggle-sidebar'){update(s=>s.ui.sidebarOpen=!s.ui.sidebarOpen,{persist:false});render();return;}
+  if(action==='toggle-sidebar'){const open=!state.ui.sidebarOpen;update(s=>s.ui.sidebarOpen=open,{persist:false});app.querySelector('.app-shell')?.classList.toggle('sidebar-is-open',open);app.querySelector('.sidebar')?.classList.toggle('open',open);app.querySelector('.sidebar-backdrop')?.classList.toggle('show',open);return;}
   if(action==='start-evaluation') return startEvaluation();
   if(action==='evaluation-session-dialog') return evaluationSessionDialog();
   if(action==='evaluation-catalog') return openEvaluationCatalog();
@@ -1225,9 +1220,10 @@ app.addEventListener('click',withOperation(async e=>{
   if(action==='toggle-reader-theme'){readerTheme=(readerTheme+1)%3;render();return;}
   if(action==='edit-profile') return profileDialog();
   if(action==='toggle-chat-panel'){toggleChatPanel();return;}
-  if(action==='chat-tab'){update(s=>{s.ui.chatTab=el.dataset.tab;s.ui.chatPanelOpen=true;const pool=s.chatThreads.filter(t=>el.dataset.tab==='groups'?t.type==='group':t.type==='dm');if(pool.length&&!pool.some(t=>t.id===s.ui.selectedChatId))s.ui.selectedChatId=pool[0].id;},{persist:false});render();return;}
-  if(action==='open-thread'){update(s=>{s.ui.selectedChatId=el.dataset.id;s.ui.chatPanelOpen=true;const t=s.chatThreads.find(x=>x.id===el.dataset.id);s.ui.chatTab=t?.type==='group'?'groups':'chats';},{persist:false});await refreshCloudChats(false);render();return;}
-  if(action==='select-thread'){update(s=>{s.ui.selectedChatId=el.dataset.id;},{persist:false});await refreshCloudChats(false);render();return;}
+  if(action==='chat-tab')return chat.tab(el.dataset.tab);
+  if(action==='open-thread')return chat.select(el.dataset.id);
+  if(action==='select-thread')return chat.select(el.dataset.id,{open:false});
+  if(action==='chat-retry'||action==='chat-latest')return; // ChatView owns these local events.
   if(action==='open-chat-person') return openChatWithPerson(el.dataset.id);
   if(action==='new-collab-group') return collaborationGroupDialog();
   if(action==='start-call') return startCall(el.dataset.id,el.dataset.mode||'audio');
@@ -1256,17 +1252,15 @@ app.addEventListener('submit',withOperation(async e=>{
   if(e.target.id==='profileForm'){e.preventDefault();await saveProfile(new FormData(e.target));}
   if(e.target.id==='replyReviewForm'){e.preventDefault();saveReviewReply(new FormData(e.target));}
   if(e.target.id==='friendForm'){e.preventDefault();await addFriend(new FormData(e.target));}
-  if(e.target.id==='collabGroupForm'){e.preventDefault();await saveCollaborationGroup(new FormData(e.target));}
+  if(e.target.id==='collabGroupForm'){e.preventDefault();await saveCollaborationGroup(e.target,new FormData(e.target));}
   if(e.target.matches('.thread-message-form')){e.preventDefault();await sendThreadMessage(e.target,new FormData(e.target));}
 }));
 
 async function openChatWithPerson(personId){
   const p=state.peopleDirectory.find(x=>x.id===personId); if(!p)return;
   try{
-    animateChatOpen=!state.ui.chatPanelOpen;
     const id=await getOrCreateDirectConversation(personId);
-    update(s=>{s.ui.selectedChatId=id;s.ui.chatTab='chats';s.ui.chatPanelOpen=true;},{persist:false});
-    await refreshCloudChats(false);render();
+    await refreshCloudChats();await chat.select(id);
   }catch(err){showFeedback(`Не удалось открыть чат: ${err.message}`);}
 }
 
@@ -1277,23 +1271,12 @@ async function addFriend(fd){
     const p=await findProfileByUsername(username);
     if(!p){notify(`@${username} не найден`);return;}
     if(p.id===state.user.id){notify('Нельзя написать самому себе');return;}
-    animateChatOpen=!state.ui.chatPanelOpen;
     const id=await getOrCreateDirectConversation(p.id);
-    update(s=>{s.ui.selectedChatId=id;s.ui.chatTab='chats';s.ui.chatPanelOpen=true;},{persist:false});
-    await refreshCloudChats(false);render();
+    await refreshCloudChats();await chat.select(id);
   }catch(err){showFeedback(`Не удалось добавить пользователя: ${err.message}`);}
 }
 
-async function sendThreadMessage(form,fd){
-  const text=String(fd.get('message')||'').trim(); if(!text)return;
-  const id=form.dataset.thread;
-  try{
-    form.querySelector('input[name="message"]').value='';
-    await sendCloudMessage(id,text);
-    update(s=>s.ui.selectedChatId=id,{persist:false});
-    await refreshCloudChats(false);render();
-  }catch(err){showFeedback(`Сообщение не отправлено: ${err.message}`);}
-}
+function sendThreadMessage(form){chat.send(form);}
 
 function saveNotes(){
   const notes=document.querySelector('#privateNotes');if(!notes)return;
@@ -1318,17 +1301,21 @@ function generateSummary(workId){
 function collaborationGroupDialog(){
   if(state.user.role!=='author'){notify('Рабочие группы проектов доступны автору');return;}
   const friends=state.friends.map(id=>state.peopleDirectory.find(p=>p.id===id)).filter(Boolean);
-  openModal(`<h2>Новая группа проекта</h2><p class="muted">Чат хранится в Supabase. Участники смогут получать сообщения со своих аккаунтов.</p><form id="collabGroupForm"><label>Название<input name="name" required placeholder="Например: Искусственная судьба — команда"></label><fieldset><legend>Участники</legend><div class="chip-checks">${friends.map(p=>`<label><input type="checkbox" name="members" value="${p.id}"><span>${esc(p.name)} · @${esc(p.username)}</span></label>`).join('')||'<p class="muted">Сначала откройте личный чат с пользователем по username.</p>'}</div></fieldset><p class="muted">Реальные WebRTC-звонки включены для личных чатов. Групповые звонки будут отдельным этапом.</p><button class="primary wide">Создать группу</button></form>`,'wide');
+  openModal(`<h2>Новая группа проекта</h2><p class="muted">Участники смогут получать сообщения со своих аккаунтов.</p><form id="collabGroupForm"><label>Название<input name="name" required placeholder="Например: Искусственная судьба — команда"></label><fieldset><legend>Участники</legend><div class="chip-checks">${friends.map(p=>`<label><input type="checkbox" name="members" value="${p.id}"><span>${esc(p.name)} · @${esc(p.username)}</span></label>`).join('')||'<p class="muted">Сначала откройте личный чат с пользователем по username.</p>'}</div></fieldset><p class="muted">Реальные WebRTC-звонки включены для личных чатов. Групповые звонки будут отдельным этапом.</p><button class="primary wide">Создать группу</button></form>`,'wide');
 }
 
-async function saveCollaborationGroup(fd){
-  const name=String(fd.get('name')||'').trim(); if(!name)return;
+async function saveCollaborationGroup(form,fd){
+  const title=String(fd.get('name')||'').trim();if(!title)return;
+  const memberIds=fd.getAll('members'),signature=JSON.stringify([title,memberIds.slice().sort()]);
+  if(form.dataset.groupInput!==signature){form.dataset.clientId=crypto.randomUUID();form.dataset.groupInput=signature;}
+  const button=form.querySelector('button.primary');button.textContent='Создаём группу…';
   try{
-    const members=fd.getAll('members');
-    const id=await createCloudGroupConversation(name,members);
-    update(s=>{s.ui.selectedChatId=id;s.ui.chatTab='groups';s.ui.chatPanelOpen=true;s.ui.modal=null;},{persist:false});
-    await refreshCloudChats(false);render();
-  }catch(err){showFeedback(`Группа не создана: ${err.message}`);}
+    const thread=await chat.transport.createGroup({title,memberIds,clientId:form.dataset.clientId});
+    chat.store.addThread(thread);chat.select(thread.id);
+    await closeModal();
+    showFeedback('Группа создана');
+  }catch(error){showFeedback(`Группа не создана: ${error.message}`,{kind:'error'});}
+  finally{button.textContent='Создать группу';}
 }
 
 async function startCall(threadId,mode){
@@ -1343,7 +1330,7 @@ async function startCall(threadId,mode){
     if(!call)throw new Error('Сервер не создал звонок');
     attemptedCallId=call.id;
     await setupRtc({callId:call.id,conversationId:threadId,peerId:peer.id,title:peer.nickname||peer.username||t.title,mode:call.mode,initiator:true});
-    render();
+    chat.mount();
   }catch(err){
     if(document.querySelector('#realCallOverlay')?.dataset.callId!==attemptedCallId||!document.querySelector('#realCallError')?.textContent)showFeedback(`Не удалось начать звонок: ${err.message}`);
   }finally{if(callStarting===attempt)callStarting=false;}
@@ -1351,7 +1338,7 @@ async function startCall(threadId,mode){
 
 async function endCall(updateServer=true){
   if(activeRtc)return finishLocalCall(updateServer);
-  update(s=>s.activeCall=null,{persist:false});removeCallOverlay();render();
+  update(s=>s.activeCall=null,{persist:false});removeCallOverlay();chat.mount();
 }
 
 function switchRole(){
@@ -1394,7 +1381,7 @@ function openCatalogEvaluation(versionId){
 async function advanceEvaluationSession(){
   const session=state.evaluationSession;if(!session)return;const item=session.items[session.currentIndex];
   if(!String(session.id).startsWith('catalog:')){try{await completeEvaluationItem(session.id,item.position);}catch(error){showFeedback(`Прогресс не сохранён: ${error.message}`);return;}}
-  const next=advanceSession(session);update(s=>{s.evaluationSession=next;s.ui.selectedQuote='';if(next.status==='completed'){s.ui.page='evaluate';s.ui.evaluationMode=null;}},{persist:false});if(next.status==='completed')notify('Сессия завершена');else render();
+  const next=advanceSession(session);update(s=>{s.evaluationSession=next;s.ui.selectedQuote='';if(next.status==='completed'){s.ui.page='evaluate';s.ui.evaluationMode=null;}},{persist:false});render();if(next.status==='completed')notify('Сессия завершена');
 }
 function startEvaluation(){
   const candidates=pages.getEvaluationCandidates();
@@ -1478,6 +1465,7 @@ async function submitReview(fd){
     s.ui.modal=null;
   });
   if(scope==='full'&&w.cloud)saveCloudReadingProgress(w,{progress:100,status:'completed'}).catch(error=>reportSyncIssue('Прогресс чтения',error));
+  await closeModal();render();
   if(scope==='evaluation'){
     openModal(`<div class="review-success"><span class="eyebrow">Рецензия опубликована</span><h2>${wasFirst?'Спасибо за отзыв':'Рецензия обновлена'}</h2><p>Отзыв привязан к версии ${esc(w.version)}. Можно сразу перейти к следующему короткому отрывку.</p><div class="actions"><button data-action="navigate" data-page="evaluate">Закончить</button><button class="primary" data-action="evaluate-next">ОЦЕНИТЬ ДАЛЕЕ →</button></div></div>`);
   }else{
@@ -1495,7 +1483,7 @@ async function submitPost(fd){
   if(!isCloudAuthenticated()){showFeedback('Сессия закончилась. Войдите снова.');loginMode=true;render();return;}
   try{await createCloudPost({text,files});update(s=>{s.ui.modal=null;},{persist:false});await refreshCloudFeed();render();}catch(err){showFeedback(`Не удалось опубликовать: ${err.message}`);}
 }
-async function likePost(id){const p=state.posts.find(x=>x.id===id);if(!p?.cloud){notify('Этот пост не является серверным');return;}try{await toggleCloudPostLike(p.cloudId);await refreshCloudFeed();render();}catch(err){showFeedback(err.message);}}
+async function likePost(id){const p=state.posts.find(x=>x.id===id);if(!p?.cloud){notify('Этот пост не является серверным');return;}try{await toggleCloudPostLike(p.cloudId);await refreshCloudFeed();const post=state.posts.find(item=>item.id===id);if(post)for(const button of app.querySelectorAll('[data-action="like-post"]'))if(button.dataset.id===id)button.textContent=`♡ ${post.likes}`;}catch(err){showFeedback(err.message);}}
 
 function collectEditor(){
   const f=document.querySelector('#workEditor');if(!f)return null;const fd=new FormData(f);syncStudioEditor();const w=state.works.find(x=>x.id===f.dataset.id);if(!w)return null;
@@ -1523,20 +1511,20 @@ async function saveWork(mode='draft'){
   if(isCloudAuthenticated()&&state.user?.role==='author'&&state.user?.verified&&local){
     try{
       const result=await persistStudioWork(local,mode);
-      if(result.fragment){notify(mode==='evaluation'?'Фрагмент опубликован для оценки':'Фрагмент сохранён');return;}
+      if(result.fragment){render();notify(mode==='evaluation'?'Фрагмент опубликован для оценки':'Фрагмент сохранён');return;}
       await saveCloudWorkTaxonomy(result.work.id,{formatId:x.formatId,genreIds:x.genreIds,audienceIds:x.audienceIds,tagIds:x.tagIds});
     }catch(err){showFeedback(`Локально сохранено, но Supabase не синхронизирован: ${err.message}`);return;}
   }
-  const msg=mode==='published'?'Произведение опубликовано в разделе «Читать»':mode==='evaluation'?'Текст опубликован в разделе «Оценить»':'Черновик сохранён'; notify(msg);
+  const msg=mode==='published'?'Произведение опубликовано в разделе «Читать»':mode==='evaluation'?'Текст опубликован в разделе «Оценить»':'Черновик сохранён';render();notify(msg);
 }
 
 function closeEvaluation(){
   syncStudioEditor();const id=document.querySelector('#workEditor')?.dataset.id;const w=state.works.find(x=>x.id===id);if(!w)return;
-  update(s=>{w.evaluationStatus='closed';w.status=w.publicationStatus==='published'?'published':'draft';});notify('Приём новых оценок закрыт. Старые рецензии сохранены.');
+  update(s=>{w.evaluationStatus='closed';w.status=w.publicationStatus==='published'?'published':'draft';});render();notify('Приём новых оценок закрыт. Старые рецензии сохранены.');
 }
 function newVersion(){
   syncStudioEditor();const id=document.querySelector('#workEditor')?.dataset.id;const w=state.works.find(x=>x.id===id);if(!w)return;const [a,b]=w.version.split('.').map(Number);
-  update(s=>{w.version=`${a}.${(b||0)+1}`;w.cloudVersionId=null;w.publicationStatus='draft';w.evaluationStatus='closed';w.status='draft';});notify('Создана новая версия. Старые отзывы остались у предыдущей версии.');
+  update(s=>{w.version=`${a}.${(b||0)+1}`;w.cloudVersionId=null;w.publicationStatus='draft';w.evaluationStatus='closed';w.status='draft';});render();notify('Создана новая версия. Старые отзывы остались у предыдущей версии.');
 }
 
 function profileDialog(){openModal(profileEditor(state.user,state.catalogs||{genres:[],topics:[]}), 'wide');}
