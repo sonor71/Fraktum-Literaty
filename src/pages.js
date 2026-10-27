@@ -1,3 +1,4 @@
+import {chatDrawer,chatDock,messagesContent} from './chat/ChatView.js';
 import {state, xpToLevel, reviewerRank} from './state.js';
 import {FEEDBACK_CATEGORIES, ANNOTATION_TYPES} from './data.js';
 import {esc,stars,pill,cover,progress,empty} from './ui.js';
@@ -24,42 +25,6 @@ const BUILTIN_MEDIA=[
   {src:'/assets/home/quote-card.png',name:'Тёмный пейзаж'},
   {src:'/assets/home/brand.png',name:'Эмблема FRAKTUM'}
 ];
-
-const personById=id=>state.peopleDirectory.find(p=>p.id===id);
-const threadById=id=>state.chatThreads.find(t=>t.id===id);
-const initials=name=>String(name||'?').split(/\s+/).map(x=>x[0]).join('').slice(0,2).toUpperCase();
-function miniPerson(p,clickable=true){
-  if(!p)return '';
-  return `<button class="dock-person ${clickable?'':'static'}" ${clickable?`data-action="open-chat-person" data-id="${p.id}"`:''} title="${esc(p.name)} @${esc(p.username)}"><span class="dock-avatar">${esc(initials(p.name))}<i class="status-dot ${p.online?'online':'offline'}"></i></span><small>${esc(p.name.split(' ')[0])}</small></button>`;
-}
-function threadMessages(t){
-  return (t?.messages||[]).map(m=>`<div class="message ${m.mine||m.fromId===me()?.id?'mine':''}"><b>${esc(m.from)}</b><small>${esc(m.time)}</small><p>${esc(m.text)}</p></div>`).join('');
-}
-function callButtons(thread){
-  const unavailable=thread.type!=='dm';
-  return `<div class="call-actions">${[['audio','☎','Аудиозвонок'],['video','▣','Видеозвонок']].map(([mode,icon,label])=>`<button data-action="start-call" data-id="${esc(thread.id)}" data-mode="${mode}" ${unavailable?'disabled':''} title="${unavailable?'Групповые звонки — Скоро':label}" aria-label="${label}">${icon}${unavailable?' Скоро':''}</button>`).join('')}</div>`;
-}
-function chatDock(){
-  const friends=state.friends.map(personById).filter(Boolean).slice(0,5);
-  return `<aside class="chat-dock"><div class="dock-title">Личные чаты</div><div class="dock-friends">${friends.map(p=>miniPerson(p)).join('')}</div>${state.activeCall?`<button class="dock-call-live" data-action="toggle-chat-panel" title="Активный звонок">●</button>`:''}</aside>`;
-}
-function chatDrawer(){
-  const open=state.ui.chatPanelOpen;
-  const tab=state.ui.chatTab||'chats';
-  const selected=threadById(state.ui.selectedChatId)||state.chatThreads[0];
-  const direct=state.chatThreads.filter(t=>t.type==='dm');
-  const groups=state.chatThreads.filter(t=>t.type==='group');
-  const list=tab==='groups'?groups:direct;
-  const active=state.activeCall;
-  return `<section id="chat-drawer" class="chat-drawer" aria-label="Сообщения" ${open?'':'inert'}><header><div><b>Сообщения</b><small>Личные чаты, группы и звонки</small></div><button data-action="toggle-chat-panel" aria-label="Закрыть чаты">×</button></header>
-    <div class="drawer-tabs"><button class="${tab==='chats'?'active':''}" data-action="chat-tab" data-tab="chats">Чаты</button><button class="${tab==='groups'?'active':''}" data-action="chat-tab" data-tab="groups">Группы</button><button class="${tab==='calls'?'active':''}" data-action="chat-tab" data-tab="calls">Звонки</button></div>
-    ${tab==='calls'?`<div class="drawer-section"><h3>${active?'Идёт звонок':'Звонки'}</h3>${active?`<div class="active-call"><b>${esc(active.title)}</b><span>${active.mode==='video'?'Видеозвонок':'Аудиозвонок'}</span><button class="danger" data-action="end-call">Завершить</button></div>`:''}${state.callHistory.length?state.callHistory.slice().reverse().map(c=>`<div class="call-log"><b>${esc(c.title)}</b><small>${esc(c.mode)} · ${esc(c.endedAt)}</small></div>`).join(''):`<p class="muted">История звонков появится здесь.</p>`}</div>`:`
-      <div class="drawer-section add-friend"><h3>Добавить друга</h3><form id="friendForm"><input name="username" placeholder="@username" required><button class="primary">Добавить</button></form></div>
-      ${tab==='groups'&&me()?.role==='author'?`<div class="drawer-section"><button class="primary wide" data-action="new-collab-group">+ Группа для проекта</button><small class="muted">Для соавторов, редакторов и команды книги.</small></div>`:''}
-      <div class="drawer-thread-list">${list.length?list.map(t=>`<button class="thread-row ${selected?.id===t.id?'active':''}" data-action="open-thread" data-id="${t.id}"><span class="dock-avatar">${esc(initials(t.title))}</span><span><b>${esc(t.title)}</b><small>${t.type==='group'?`${t.memberIds.length+1} участников`:`${esc(personById(t.memberIds[0])?.username||'')}`}</small></span></button>`).join(''):`<div class="empty"><p>Пока пусто.</p></div>`}</div>
-      ${selected&&((tab==='groups'&&selected.type==='group')||(tab==='chats'&&selected.type==='dm'))?`<div class="drawer-chat"><div class="drawer-chat-head"><div><b>${esc(selected.title)}</b><small>${selected.type==='group'?'Рабочая группа':'Личный чат'}</small></div>${callButtons(selected)}</div><div class="drawer-messages">${threadMessages(selected)}</div><form class="thread-message-form" data-thread="${selected.id}"><input name="message" placeholder="Сообщение..." required><button class="primary">→</button></form></div>`:''}`}
-  </section>`;
-}
 
 export function onboarding(){
   return `<main class="onboarding"><section class="onboard-card">
@@ -146,9 +111,9 @@ export function shell(content){
     <div class="chat-shell ${state.ui.chatPanelOpen?'is-open':''}">
       <div class="chat-slide">
         <button class="chat-edge-toggle" data-action="toggle-chat-panel" aria-controls="chat-drawer" aria-expanded="${!!state.ui.chatPanelOpen}" aria-label="${state.ui.chatPanelOpen?'Закрыть чаты':'Открыть чаты'}">${state.ui.chatPanelOpen?'›':'‹'}</button>
-        ${chatDrawer()}
+        ${chatDrawer(state)}
       </div>
-      ${chatDock()}
+      ${chatDock(state)}
     </div>
   </div>`;
 }
@@ -434,16 +399,7 @@ export function communityDetail(){
   return shell(`<button class="text-btn" data-action="navigate" data-page="communities">← Сообщества</button><div class="page-head"><div><span class="eyebrow">${esc(c.type)}</span><h1>${esc(c.name)}</h1><p>${esc(c.description)}</p></div><button disabled>Участие · Скоро</button></div><div class="tabs"><button disabled>Лента · Скоро</button><button disabled>Обсуждения · Скоро</button><button disabled>Флуд · Скоро</button><button disabled>Работы участников · Скоро</button><button disabled>Участники · Скоро</button></div><section class="card"><p>Эта запись сохранена локально. Публикации и участники пока не синхронизируются.</p></section>`);
 }
 
-export function messagesPage(){
-  const selected=threadById(state.ui.selectedChatId)||state.chatThreads[0];
-  const direct=state.chatThreads.filter(t=>t.type==='dm');
-  const groups=state.chatThreads.filter(t=>t.type==='group');
-  return shell(`<div class="page-head"><div><h1>Сообщения</h1><p>Личные чаты и рабочие группы вокруг произведений.</p></div><div class="actions"><button data-action="toggle-chat-panel">Открыть мини-панель</button>${me().role==='author'?`<button class="primary" data-action="new-collab-group">+ Группа проекта</button>`:''}</div></div>
-  <div class="messages-layout"><aside class="chat-list"><h3>Личные</h3>${direct.map(t=>`<button class="${selected?.id===t.id?'active':''}" data-action="select-thread" data-id="${t.id}">${esc(t.title)}</button>`).join('')}<h3>Группы</h3>${groups.map(t=>`<button class="${selected?.id===t.id?'active':''}" data-action="select-thread" data-id="${t.id}">${esc(t.title)}</button>`).join('')}</aside>
-  <section class="chat"><div class="chat-main-head"><div><h2>${esc(selected?.title||'Выберите чат')}</h2><small>${selected?.type==='group'?'Рабочая группа':'Личный чат'}</small></div>${selected?`${callButtons(selected)}`:''}</div><div class="message-stream">${selected?threadMessages(selected):''}</div>${selected?`<form class="message-form thread-message-form" data-thread="${selected.id}"><input name="message" placeholder="Сообщение..." required><button class="primary">Отправить</button></form>`:''}</section>
-  <aside class="card"><h3>${selected?.type==='group'?'Участники':'Друг'}</h3>${selected?.memberIds?.map(id=>{const p=personById(id);return p?`<div class="member-row"><span class="dock-avatar">${esc(initials(p.name))}<i class="status-dot ${p.online?'online':'offline'}"></i></span><span><b>${esc(p.name)}</b><small>@${esc(p.username)} · ${esc(p.role)}</small></span></div>`:''}).join('')||'<p class="muted">Нет данных</p>'}<hr><h3>Быстрые действия</h3><button class="wide" data-action="toggle-chat-panel">Показать правую панель чатов</button></aside></div>`);
-}
-
+export function messagesPage(){ return shell(messagesContent(state)); }
 
 export function profilePage(){ return shell(profileView()); }
 export function feedbackPage(){ return shell(feedbackView()); }

@@ -7,4 +7,4 @@ export const cover=(w,cls='')=>`<img class="cover ${esc(cls)}" src="${esc(w.cove
 export const progress=(value)=>`<div class="progress"><i style="width:${clamp(value,0,100)}%"></i></div>`;
 export function toast(text){ return `<div class="toast">${esc(text)}</div>`; }
 export function empty(title,text){ return `<div class="empty"><h3>${esc(title)}</h3><p>${esc(text)}</p></div>`; }
-export function modal(content,size='normal'){ return `<div class="modal-backdrop" data-action="close-modal"><section class="modal ${size}" data-stop>${content}</section></div>`; }
+export function modal(content,size='normal'){ return `<div class="modal-backdrop" data-action="close-modal"><section class="modal ${size}" role="dialog" aria-modal="true" aria-label="Диалог FRAKTUM" data-stop>${content}</section></div>`; }

@@ -108,7 +108,9 @@ test('messenger opens a direct chat, sends a message and creates a persistent pr
   await page.waitForSelector('.drawer-chat .thread-message-form');
   assert.match(await page.locator('.drawer-chat-head').innerText(),/Peer Reader/);
   await page.locator('.drawer-chat .thread-message-form [name="message"]').fill('Direct browser message');
+  const directSent=page.waitForResponse(response=>response.url().includes('/rest/v1/lit_messages')&&response.request().method()==='POST'&&response.status()===201);
   await page.locator('.drawer-chat .thread-message-form button').click();
+  await directSent;
   await page.waitForFunction(()=>document.querySelector('.drawer-messages')?.textContent.includes('Direct browser message'));
   assert.equal(fixture.tables.lit_messages[0].body,'Direct browser message');
   await page.locator('.drawer-tabs [data-tab="groups"]').click();
@@ -122,12 +124,16 @@ test('messenger opens a direct chat, sends a message and creates a persistent pr
   assert.equal(fixture.tables.lit_conversation_members.filter(member=>member.conversation_id===group.id).length,2);
   await page.waitForSelector('.drawer-chat .thread-message-form');
   await page.locator('.drawer-chat .thread-message-form [name="message"]').fill('Group browser message');
+  const groupSent=page.waitForResponse(response=>response.url().includes('/rest/v1/lit_messages')&&response.request().method()==='POST'&&response.status()===201);
   await page.locator('.drawer-chat .thread-message-form button').click();
+  await groupSent;
   await page.waitForFunction(()=>document.querySelector('.drawer-messages')?.textContent.includes('Group browser message'));
   await page.reload();
   await page.waitForSelector('.app-shell');
   await page.locator('.chat-edge-toggle').click();
   await page.locator('.drawer-tabs [data-tab="groups"]').click();
-  assert.match(await page.locator('.drawer-thread-list').innerText(),/Browser Project Group/);
+  assert.match(await page.locator('#chat-panel-groups .drawer-thread-list').innerText(),/Browser Project Group/);
+  await page.locator(`#chat-panel-groups [data-id="${group.id}"]`).click();
+  await page.waitForFunction(()=>document.querySelector('#chat-drawer [data-chat-messages]')?.textContent.includes('Group browser message'));
   assertClean(scenario);
 });
